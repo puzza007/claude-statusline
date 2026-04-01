@@ -175,7 +175,7 @@ fn git_part(dir: &str) -> String {
         }
     }
 
-    format!(" {} {}{}", "\u{e0a0}".dimmed(), branch.magenta(), flags,)
+    format!(" {} {}{}", "\u{2387}".dimmed(), branch.magenta(), flags,)
 }
 
 fn stash_count(repo: &mut Repository) -> Result<u32, git2::Error> {

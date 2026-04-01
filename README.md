@@ -7,16 +7,21 @@ Replaces the default statusline with a compact, color-coded display showing your
 ## Output
 
 ```
-~/src/my-project [main !?^2] | Claude Opus 4.6 ctx:24% rate:12% $1.47 +42 -10
+~/src/my-project ⎇ main +2 !3 ?4 | Opus 4.6 (1M context) ctx:24% rate:12% $1.47 +42 -10
 ```
 
 | Segment | Description |
 |---|---|
 | Directory | Current working directory (bold blue) |
-| Branch | Git branch name (magenta) |
-| `!` | Staged or unstaged changes (yellow) |
-| `?` | Untracked files (yellow) |
-| `^N` / `vN` | Commits ahead/behind upstream (yellow) |
+| `⎇` | Git branch icon (dimmed) |
+| Branch | Git branch name or short SHA when detached (magenta) |
+| `=N` | Conflicted files (red) |
+| `+N` | Staged files (green) |
+| `!N` | Modified files (yellow) |
+| `✘N` | Deleted files (red) |
+| `?N` | Untracked files (blue) |
+| `$N` | Stashes (cyan) |
+| `⇡N` / `⇣N` | Commits ahead (green) / behind (red) upstream |
 | Model | Active Claude model (cyan) |
 | `ctx:N%` | Context window usage — green/yellow/red at 50%/80% |
 | `rate:N%` | 5-hour rate limit usage — green/yellow/red at 50%/80% |

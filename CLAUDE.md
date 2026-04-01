@@ -26,7 +26,7 @@ Claude Code pipes a JSON object to stdin with fields: `model`, `workspace`, `con
 ### Output Format
 
 ```
-<dir>  <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> | <model> ctx:<N>% rate:<N>% $<cost> +<added> -<removed>
+<dir> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> | <model> ctx:<N>% rate:<N>% $<cost> +<added> -<removed>
 ```
 
 Git status symbols (starship-style):
