@@ -58,18 +58,6 @@ struct RateLimit {
     used_percentage: Option<f64>,
 }
 
-const CHANGED: Status = Status::from_bits_truncate(
-    Status::INDEX_NEW.bits()
-        | Status::INDEX_MODIFIED.bits()
-        | Status::INDEX_DELETED.bits()
-        | Status::INDEX_RENAMED.bits()
-        | Status::INDEX_TYPECHANGE.bits()
-        | Status::WT_MODIFIED.bits()
-        | Status::WT_DELETED.bits()
-        | Status::WT_RENAMED.bits()
-        | Status::WT_TYPECHANGE.bits(),
-);
-
 fn shorten_home(path: &str) -> String {
     if let Some(home) = std::env::var_os("HOME") {
         let home = home.to_string_lossy();
@@ -80,24 +68,38 @@ fn shorten_home(path: &str) -> String {
     path.to_string()
 }
 
+const STAGED: Status = Status::from_bits_truncate(
+    Status::INDEX_NEW.bits()
+        | Status::INDEX_MODIFIED.bits()
+        | Status::INDEX_DELETED.bits()
+        | Status::INDEX_RENAMED.bits()
+        | Status::INDEX_TYPECHANGE.bits(),
+);
+
+const WT_MODIFIED: Status = Status::from_bits_truncate(
+    Status::WT_MODIFIED.bits() | Status::WT_RENAMED.bits() | Status::WT_TYPECHANGE.bits(),
+);
+
 fn git_part(dir: &str) -> String {
-    let repo = match Repository::discover(dir) {
+    let mut repo = match Repository::discover(dir) {
         Ok(r) => r,
         Err(_) => return String::new(),
     };
 
-    let head = match repo.head() {
-        Ok(h) => h,
-        Err(_) => return String::new(),
-    };
-
-    let is_branch = head.is_branch();
-    let branch = if is_branch {
-        head.shorthand().unwrap_or("").to_string()
-    } else {
-        head.target()
-            .map(|oid| oid.to_string()[..7].to_string())
-            .unwrap_or_default()
+    let (is_branch, branch) = {
+        let head = match repo.head() {
+            Ok(h) => h,
+            Err(_) => return String::new(),
+        };
+        let is_branch = head.is_branch();
+        let branch = if is_branch {
+            head.shorthand().unwrap_or("").to_string()
+        } else {
+            head.target()
+                .map(|oid| oid.to_string()[..7].to_string())
+                .unwrap_or_default()
+        };
+        (is_branch, branch)
     };
 
     if branch.is_empty() {
@@ -109,22 +111,51 @@ fn git_part(dir: &str) -> String {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).exclude_submodules(true);
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        let mut has_changed = false;
-        let mut has_untracked = false;
+        let mut staged = 0u32;
+        let mut modified = 0u32;
+        let mut deleted = 0u32;
+        let mut untracked = 0u32;
+        let mut conflicted = 0u32;
+
         for entry in statuses.iter() {
             let s = entry.status();
-            has_changed = has_changed || s.intersects(CHANGED);
-            has_untracked = has_untracked || s.contains(Status::WT_NEW);
-            if has_changed && has_untracked {
-                break;
+            if s.contains(Status::CONFLICTED) {
+                conflicted += 1;
+            }
+            if s.intersects(STAGED) {
+                staged += 1;
+            }
+            if s.intersects(WT_MODIFIED) {
+                modified += 1;
+            }
+            if s.intersects(Status::WT_DELETED) || s.intersects(Status::INDEX_DELETED) {
+                deleted += 1;
+            }
+            if s.contains(Status::WT_NEW) {
+                untracked += 1;
             }
         }
-        if has_changed {
-            flags.push('!');
+        if conflicted > 0 {
+            write!(flags, " {}", format!("={conflicted}").red()).ok();
         }
-        if has_untracked {
-            flags.push('?');
+        if staged > 0 {
+            write!(flags, " {}", format!("+{staged}").green()).ok();
         }
+        if modified > 0 {
+            write!(flags, " {}", format!("!{modified}").yellow()).ok();
+        }
+        if deleted > 0 {
+            write!(flags, " {}", format!("✘{deleted}").red()).ok();
+        }
+        if untracked > 0 {
+            write!(flags, " {}", format!("?{untracked}").blue()).ok();
+        }
+    }
+
+    if let Ok(stashes) = stash_count(&mut repo)
+        && stashes > 0
+    {
+        write!(flags, " {}", format!("${stashes}").cyan()).ok();
     }
 
     if is_branch {
@@ -136,25 +167,24 @@ fn git_part(dir: &str) -> String {
             && let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid)
         {
             if ahead > 0 {
-                write!(flags, "^{ahead}").ok();
+                write!(flags, " {}", format!("⇡{ahead}").green()).ok();
             }
             if behind > 0 {
-                write!(flags, "v{behind}").ok();
+                write!(flags, " {}", format!("⇣{behind}").red()).ok();
             }
         }
     }
 
-    if flags.is_empty() {
-        format!(" {}", format!("[{branch}]").magenta())
-    } else {
-        format!(
-            " {}{}{}{}",
-            "[".magenta(),
-            format!("{branch} ").magenta(),
-            flags.yellow(),
-            "]".magenta(),
-        )
-    }
+    format!(" {} {}{}", "\u{e0a0}".dimmed(), branch.magenta(), flags,)
+}
+
+fn stash_count(repo: &mut Repository) -> Result<u32, git2::Error> {
+    let mut count = 0u32;
+    repo.stash_foreach(|_, _, _| {
+        count += 1;
+        true
+    })?;
+    Ok(count)
 }
 
 fn pct_color(pct: f64, label: &str) -> String {

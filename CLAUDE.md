@@ -26,8 +26,17 @@ Claude Code pipes a JSON object to stdin with fields: `model`, `workspace`, `con
 ### Output Format
 
 ```
-<dir> [<branch> <flags>] | <model> ctx:<N>% rate:<N>% $<cost> +<added> -<removed>
+<dir>  <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> | <model> ctx:<N>% rate:<N>% $<cost> +<added> -<removed>
 ```
+
+Git status symbols (starship-style):
+- `+N` — staged files
+- `!N` — modified files
+- `✘N` — deleted files
+- `?N` — untracked files
+- `$N` — stashes
+- `=N` — conflicted files
+- `⇡N` / `⇣N` — ahead / behind upstream
 
 ### Dependencies
 
