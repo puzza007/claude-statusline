@@ -51,6 +51,7 @@ struct Cost {
 #[derive(Deserialize)]
 struct RateLimits {
     five_hour: Option<RateLimit>,
+    seven_day: Option<RateLimit>,
 }
 
 #[derive(Deserialize)]
@@ -218,9 +219,18 @@ fn main() {
 
     let rate = data
         .rate_limits
-        .and_then(|r| r.five_hour)
+        .as_ref()
+        .and_then(|r| r.five_hour.as_ref())
         .and_then(|r| r.used_percentage)
         .map(|p| format!(" {}", pct_color(p, "rate")))
+        .unwrap_or_default();
+
+    let weekly = data
+        .rate_limits
+        .as_ref()
+        .and_then(|r| r.seven_day.as_ref())
+        .and_then(|r| r.used_percentage)
+        .map(|p| format!(" {}", pct_color(p, "wk")))
         .unwrap_or_default();
 
     let cost_usd = data.cost.total_cost_usd.unwrap_or(0.0);
@@ -244,13 +254,14 @@ fn main() {
 
     let model = &data.model.display_name;
     println!(
-        "{}{} {} {}{}{}{}{lines}",
+        "{}{} {} {}{}{}{}{}{lines}",
         dir.bold().blue(),
         git,
         "|".dimmed(),
         model.cyan(),
         ctx,
         rate,
+        weekly,
         cost,
     );
 }
@@ -336,16 +347,15 @@ mod tests {
             "workspace": {"current_dir": "/home/user/project"},
             "context_window": {"used_percentage": 42.5},
             "cost": {"total_cost_usd": 1.23, "total_lines_added": 10, "total_lines_removed": 5},
-            "rate_limits": {"five_hour": {"used_percentage": 15.0}}
+            "rate_limits": {"five_hour": {"used_percentage": 15.0}, "seven_day": {"used_percentage": 42.0}}
         }"#;
         let data: Input = serde_json::from_str(json).unwrap();
         assert_eq!(data.context_window.used_percentage, Some(42.5));
         assert_eq!(data.cost.total_cost_usd, Some(1.23));
         assert_eq!(data.cost.total_lines_added, Some(10));
-        assert_eq!(
-            data.rate_limits.unwrap().five_hour.unwrap().used_percentage,
-            Some(15.0)
-        );
+        let rl = data.rate_limits.unwrap();
+        assert_eq!(rl.five_hour.unwrap().used_percentage, Some(15.0));
+        assert_eq!(rl.seven_day.unwrap().used_percentage, Some(42.0));
     }
 
     #[test]
