@@ -8,6 +8,7 @@ description = "A fast, custom statusline for Claude Code"
 tempfile = "3"
 
 [dependencies]
+chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 colored = "3"
 git2 = { version = "0.20", default-features = false }

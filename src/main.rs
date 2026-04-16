@@ -1,3 +1,4 @@
+use chrono::Local;
 use clap::Parser;
 use colored::Colorize;
 use git2::{Repository, Status, StatusOptions};
@@ -57,6 +58,7 @@ struct RateLimits {
 #[derive(Deserialize)]
 struct RateLimit {
     used_percentage: Option<f64>,
+    resets_at: Option<i64>,
 }
 
 fn shorten_home(path: &str) -> String {
@@ -199,6 +201,38 @@ fn pct_color(pct: f64, label: &str) -> String {
     }
 }
 
+const BLOCKS: [char; 9] = ['░', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+/// Renders a compact 3-char block bar for a 0.0–1.0 progress value.
+fn progress_bar(progress: f64) -> String {
+    let num_blocks = 3;
+    let filled = progress.clamp(0.0, 1.0) * num_blocks as f64;
+
+    let mut bar = String::with_capacity(num_blocks * 3);
+    for i in 0..num_blocks {
+        if (i as f64) < filled.floor() {
+            bar.push('█');
+        } else if (i as f64) < filled {
+            let frac = filled - filled.floor();
+            let level = (frac * 8.0).round() as usize;
+            bar.push(BLOCKS[level.min(8)]);
+        } else {
+            bar.push('░');
+        }
+    }
+
+    bar.dimmed().to_string()
+}
+
+/// Returns a 3-char block bar showing elapsed time in a rate limit window.
+/// `resets_at` is a Unix timestamp; `window_secs` is the window duration.
+fn window_bar(resets_at: i64, window_secs: f64) -> String {
+    let now = Local::now().timestamp();
+    let start = resets_at as f64 - window_secs;
+    let elapsed = (now as f64 - start).clamp(0.0, window_secs);
+    progress_bar(elapsed / window_secs)
+}
+
 fn main() {
     let _cli = Cli::parse();
     colored::control::set_override(true);
@@ -217,20 +251,23 @@ fn main() {
         .map(|p| format!(" {}", pct_color(p, "ctx")))
         .unwrap_or_default();
 
-    let rate = data
-        .rate_limits
-        .as_ref()
-        .and_then(|r| r.five_hour.as_ref())
+    let five_hour = data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref());
+
+    let rate = five_hour
         .and_then(|r| r.used_percentage)
-        .map(|p| format!(" {}", pct_color(p, "rate")))
+        .map(|p| format!(" {}", pct_color(p, "5h")))
         .unwrap_or_default();
 
-    let weekly = data
-        .rate_limits
-        .as_ref()
-        .and_then(|r| r.seven_day.as_ref())
+    let rate_5h_bar = five_hour
+        .and_then(|r| r.resets_at)
+        .map(|ts| format!(" {}:{}", "t".dimmed(), window_bar(ts, 5.0 * 3600.0)))
+        .unwrap_or_default();
+
+    let seven_day = data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref());
+
+    let weekly = seven_day
         .and_then(|r| r.used_percentage)
-        .map(|p| format!(" {}", pct_color(p, "wk")))
+        .map(|p| format!(" {}", pct_color(p, "7d")))
         .unwrap_or_default();
 
     let cost_usd = data.cost.total_cost_usd.unwrap_or(0.0);
@@ -252,18 +289,16 @@ fn main() {
         String::new()
     };
 
+    let week = seven_day
+        .and_then(|r| r.resets_at)
+        .map(|ts| format!(" {}:{}", "wk".dimmed(), window_bar(ts, 7.0 * 24.0 * 3600.0)))
+        .unwrap_or_default();
+
     let model = &data.model.display_name;
-    println!(
-        "{}{} {} {}{}{}{}{}{lines}",
-        dir.bold().blue(),
-        git,
-        "|".dimmed(),
-        model.cyan(),
-        ctx,
-        rate,
-        weekly,
-        cost,
-    );
+    let dir_fmt = dir.bold().blue();
+    let sep = "|".dimmed();
+    let model_fmt = model.cyan();
+    println!("{dir_fmt}{git} {sep} {model_fmt}{ctx}{rate}{rate_5h_bar}{weekly}{week}{cost}{lines}");
 }
 
 #[cfg(test)]
@@ -402,6 +437,20 @@ mod tests {
         fs::write(tmp.path().join("untracked.txt"), "new").unwrap();
         let result = git_part(tmp.path().to_str().unwrap());
         assert!(result.contains("?"));
+    }
+
+    #[test]
+    fn window_bar_returns_3_visible_chars() {
+        force_colors();
+        // resets_at 2.5 hours from now → halfway through a 5h window
+        let resets_at = Local::now().timestamp() + (2.5 * 3600.0) as i64;
+        let result = window_bar(resets_at, 5.0 * 3600.0);
+        let visible: String = result.replace("\x1b[2m", "").replace("\x1b[0m", "");
+        assert_eq!(
+            visible.chars().count(),
+            3,
+            "expected 3 block chars, got: {visible}"
+        );
     }
 
     #[test]

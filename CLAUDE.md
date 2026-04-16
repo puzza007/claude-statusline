@@ -26,8 +26,10 @@ Claude Code pipes a JSON object to stdin with fields: `model`, `workspace`, `con
 ### Output Format
 
 ```
-<dir> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> | <model> ctx:<N>% rate:<N>% wk:<N>% $<cost> +<added> -<removed>
+<dir> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> | <model> ctx:<N>% 5h:<N>% t:<bar> 7d:<N>% wk:<bar> $<cost> +<added> -<removed>
 ```
+
+Rate limit time bars: 3-character block bars using fractional Unicode blocks (`░▏▎▍▌▋▊▉█`) showing elapsed time in the rate limit window. `t:` tracks the 5-hour window, `wk:` tracks the 7-day window. Both use the `resets_at` timestamp from Claude Code.
 
 Git status symbols (starship-style):
 - `+N` — staged files
@@ -42,6 +44,7 @@ Git status symbols (starship-style):
 
 - `serde` / `serde_json` — JSON deserialization
 - `git2` — git status via libgit2 (no subprocess spawning)
+- `chrono` — local time for rate limit time bars
 - `colored` — ANSI terminal colors (forced on since stdout is piped)
 
 ### Configuration
