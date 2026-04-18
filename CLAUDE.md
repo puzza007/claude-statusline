@@ -42,6 +42,8 @@ Git status symbols (starship-style):
 - `=N` — conflicted files
 - `⇡N` / `⇣N` — ahead / behind upstream
 
+Lines changed (`+<added> -<removed>`): total insertions and deletions in uncommitted changes (staged + unstaged) vs HEAD, computed via `git2::Diff::stats()`.
+
 ### Dependencies
 
 - `serde` / `serde_json` — JSON deserialization

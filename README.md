@@ -30,7 +30,7 @@ Replaces the default statusline with a compact, color-coded display showing your
 | `wk:N%` | Elapsed time in the 7-day rate limit window |
 | `▼` / `▲` | Weekly pace indicator — under/over sustainable usage rate |
 | `$N.NN` | Session cost in USD (green) |
-| `+N -N` | Lines added (green) / removed (red) |
+| `+N -N` | Uncommitted lines added (green) / removed (red) vs HEAD |
 
 ## Install
 

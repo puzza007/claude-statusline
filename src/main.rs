@@ -45,8 +45,6 @@ struct ContextWindow {
 #[derive(Deserialize)]
 struct Cost {
     total_cost_usd: Option<f64>,
-    total_lines_added: Option<i64>,
-    total_lines_removed: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +188,17 @@ fn stash_count(repo: &mut Repository) -> Result<u32, git2::Error> {
     Ok(count)
 }
 
+/// Returns (insertions, deletions) for uncommitted changes (staged + unstaged) vs HEAD.
+fn git_lines(dir: &str) -> Option<(usize, usize)> {
+    let repo = Repository::discover(dir).ok()?;
+    let head = repo.head().ok()?.peel_to_tree().ok()?;
+    let diff = repo
+        .diff_tree_to_workdir_with_index(Some(&head), None)
+        .ok()?;
+    let stats = diff.stats().ok()?;
+    Some((stats.insertions(), stats.deletions()))
+}
+
 fn pct_color(pct: f64, label: &str) -> String {
     colorize_by_pct(pct, &format!("{label}:{pct:.0}%"))
 }
@@ -263,16 +272,13 @@ fn main() {
         String::new()
     };
 
-    let added = data.cost.total_lines_added.unwrap_or(0);
-    let removed = data.cost.total_lines_removed.unwrap_or(0);
-    let lines = if added > 0 || removed > 0 {
-        format!(
+    let lines = match git_lines(&data.workspace.current_dir) {
+        Some((added, removed)) if added > 0 || removed > 0 => format!(
             " {} {}",
             format!("+{added}").green(),
             format!("-{removed}").red(),
-        )
-    } else {
-        String::new()
+        ),
+        _ => String::new(),
     };
 
     let week = seven_day
@@ -397,13 +403,12 @@ mod tests {
             "model": {"display_name": "Claude Opus 4.6"},
             "workspace": {"current_dir": "/home/user/project"},
             "context_window": {"used_percentage": 42.5},
-            "cost": {"total_cost_usd": 1.23, "total_lines_added": 10, "total_lines_removed": 5},
+            "cost": {"total_cost_usd": 1.23},
             "rate_limits": {"five_hour": {"used_percentage": 15.0}, "seven_day": {"used_percentage": 42.0}}
         }"#;
         let data: Input = serde_json::from_str(json).unwrap();
         assert_eq!(data.context_window.used_percentage, Some(42.5));
         assert_eq!(data.cost.total_cost_usd, Some(1.23));
-        assert_eq!(data.cost.total_lines_added, Some(10));
         let rl = data.rate_limits.unwrap();
         assert_eq!(rl.five_hour.unwrap().used_percentage, Some(15.0));
         assert_eq!(rl.seven_day.unwrap().used_percentage, Some(42.0));
