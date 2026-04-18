@@ -45,8 +45,6 @@ struct ContextWindow {
 #[derive(Deserialize)]
 struct Cost {
     total_cost_usd: Option<f64>,
-    total_lines_added: Option<i64>,
-    total_lines_removed: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -190,8 +188,22 @@ fn stash_count(repo: &mut Repository) -> Result<u32, git2::Error> {
     Ok(count)
 }
 
+/// Returns (insertions, deletions) for uncommitted changes (staged + unstaged) vs HEAD.
+fn git_lines(dir: &str) -> Option<(usize, usize)> {
+    let repo = Repository::discover(dir).ok()?;
+    let head = repo.head().ok()?.peel_to_tree().ok()?;
+    let diff = repo
+        .diff_tree_to_workdir_with_index(Some(&head), None)
+        .ok()?;
+    let stats = diff.stats().ok()?;
+    Some((stats.insertions(), stats.deletions()))
+}
+
 fn pct_color(pct: f64, label: &str) -> String {
-    let text = format!("{label}:{pct:.0}%");
+    colorize_by_pct(pct, &format!("{label}:{pct:.0}%"))
+}
+
+fn colorize_by_pct(pct: f64, text: &str) -> String {
     if pct >= 80.0 {
         text.red().to_string()
     } else if pct >= 50.0 {
@@ -201,36 +213,12 @@ fn pct_color(pct: f64, label: &str) -> String {
     }
 }
 
-const BLOCKS: [char; 9] = ['░', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
-
-/// Renders a compact 3-char block bar for a 0.0–1.0 progress value.
-fn progress_bar(progress: f64) -> String {
-    let num_blocks = 3;
-    let filled = progress.clamp(0.0, 1.0) * num_blocks as f64;
-
-    let mut bar = String::with_capacity(num_blocks * 3);
-    for i in 0..num_blocks {
-        if (i as f64) < filled.floor() {
-            bar.push('█');
-        } else if (i as f64) < filled {
-            let frac = filled - filled.floor();
-            let level = (frac * 8.0).round() as usize;
-            bar.push(BLOCKS[level.min(8)]);
-        } else {
-            bar.push('░');
-        }
-    }
-
-    bar.dimmed().to_string()
-}
-
-/// Returns a 3-char block bar showing elapsed time in a rate limit window.
-/// `resets_at` is a Unix timestamp; `window_secs` is the window duration.
-fn window_bar(resets_at: i64, window_secs: f64) -> String {
+/// Returns the elapsed percentage of a rate limit window.
+fn window_pct(resets_at: i64, window_secs: f64) -> f64 {
     let now = Local::now().timestamp();
     let start = resets_at as f64 - window_secs;
     let elapsed = (now as f64 - start).clamp(0.0, window_secs);
-    progress_bar(elapsed / window_secs)
+    elapsed / window_secs * 100.0
 }
 
 fn main() {
@@ -252,21 +240,28 @@ fn main() {
         .unwrap_or_default();
 
     let five_hour = data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref());
+    let five_hour_pct = five_hour.and_then(|r| r.used_percentage);
 
-    let rate = five_hour
-        .and_then(|r| r.used_percentage)
+    let rate = five_hour_pct
         .map(|p| format!(" {}", pct_color(p, "5h")))
         .unwrap_or_default();
 
-    let rate_5h_bar = five_hour
+    let rate_5h_time = five_hour
         .and_then(|r| r.resets_at)
-        .map(|ts| format!(" {}:{}", "t".dimmed(), window_bar(ts, 5.0 * 3600.0)))
+        .map(|ts| {
+            let time_pct = window_pct(ts, 5.0 * 3600.0);
+            let color_pct = five_hour_pct.unwrap_or(0.0);
+            format!(
+                " {}",
+                colorize_by_pct(color_pct, &format!("t:{time_pct:.0}%"))
+            )
+        })
         .unwrap_or_default();
 
     let seven_day = data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref());
+    let seven_day_pct = seven_day.and_then(|r| r.used_percentage);
 
-    let weekly = seven_day
-        .and_then(|r| r.used_percentage)
+    let weekly = seven_day_pct
         .map(|p| format!(" {}", pct_color(p, "7d")))
         .unwrap_or_default();
 
@@ -277,28 +272,55 @@ fn main() {
         String::new()
     };
 
-    let added = data.cost.total_lines_added.unwrap_or(0);
-    let removed = data.cost.total_lines_removed.unwrap_or(0);
-    let lines = if added > 0 || removed > 0 {
-        format!(
+    let lines = match git_lines(&data.workspace.current_dir) {
+        Some((added, removed)) if added > 0 || removed > 0 => format!(
             " {} {}",
             format!("+{added}").green(),
             format!("-{removed}").red(),
-        )
-    } else {
-        String::new()
+        ),
+        _ => String::new(),
     };
 
     let week = seven_day
         .and_then(|r| r.resets_at)
-        .map(|ts| format!(" {}:{}", "wk".dimmed(), window_bar(ts, 7.0 * 24.0 * 3600.0)))
+        .map(|ts| {
+            let time_pct = window_pct(ts, 7.0 * 24.0 * 3600.0);
+            let color_pct = seven_day_pct.unwrap_or(0.0);
+            let wk_text = colorize_by_pct(color_pct, &format!("wk:{time_pct:.0}%"));
+
+            // Sustainable pace indicator: usage% vs time elapsed%
+            let pace = match seven_day_pct {
+                Some(usage) => {
+                    let delta = usage - time_pct;
+                    if delta > 20.0 {
+                        "▲".red().to_string()
+                    } else if delta > 0.0 {
+                        "▲".yellow().to_string()
+                    } else if delta > -20.0 {
+                        "▼".green().to_string()
+                    } else {
+                        "▼".bright_green().to_string()
+                    }
+                }
+                None => String::new(),
+            };
+
+            format!(" {wk_text} {pace}")
+        })
         .unwrap_or_default();
 
-    let model = &data.model.display_name;
+    let model = data
+        .model
+        .display_name
+        .split_once(" (")
+        .map(|(name, _)| name)
+        .unwrap_or(&data.model.display_name);
     let dir_fmt = dir.bold().blue();
     let sep = "|".dimmed();
     let model_fmt = model.cyan();
-    println!("{dir_fmt}{git} {sep} {model_fmt}{ctx}{rate}{rate_5h_bar}{weekly}{week}{cost}{lines}");
+    println!(
+        "{dir_fmt}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{cost}"
+    );
 }
 
 #[cfg(test)]
@@ -381,13 +403,12 @@ mod tests {
             "model": {"display_name": "Claude Opus 4.6"},
             "workspace": {"current_dir": "/home/user/project"},
             "context_window": {"used_percentage": 42.5},
-            "cost": {"total_cost_usd": 1.23, "total_lines_added": 10, "total_lines_removed": 5},
+            "cost": {"total_cost_usd": 1.23},
             "rate_limits": {"five_hour": {"used_percentage": 15.0}, "seven_day": {"used_percentage": 42.0}}
         }"#;
         let data: Input = serde_json::from_str(json).unwrap();
         assert_eq!(data.context_window.used_percentage, Some(42.5));
         assert_eq!(data.cost.total_cost_usd, Some(1.23));
-        assert_eq!(data.cost.total_lines_added, Some(10));
         let rl = data.rate_limits.unwrap();
         assert_eq!(rl.five_hour.unwrap().used_percentage, Some(15.0));
         assert_eq!(rl.seven_day.unwrap().used_percentage, Some(42.0));
@@ -440,17 +461,11 @@ mod tests {
     }
 
     #[test]
-    fn window_bar_returns_3_visible_chars() {
-        force_colors();
+    fn window_pct_halfway() {
         // resets_at 2.5 hours from now → halfway through a 5h window
         let resets_at = Local::now().timestamp() + (2.5 * 3600.0) as i64;
-        let result = window_bar(resets_at, 5.0 * 3600.0);
-        let visible: String = result.replace("\x1b[2m", "").replace("\x1b[0m", "");
-        assert_eq!(
-            visible.chars().count(),
-            3,
-            "expected 3 block chars, got: {visible}"
-        );
+        let pct = window_pct(resets_at, 5.0 * 3600.0);
+        assert!((pct - 50.0).abs() < 1.0, "expected ~50%, got: {pct}");
     }
 
     #[test]

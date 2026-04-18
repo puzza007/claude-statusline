@@ -26,10 +26,12 @@ Claude Code pipes a JSON object to stdin with fields: `model`, `workspace`, `con
 ### Output Format
 
 ```
-<dir> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> | <model> ctx:<N>% 5h:<N>% t:<bar> 7d:<N>% wk:<bar> $<cost> +<added> -<removed>
+<dir> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <pace> $<cost>
 ```
 
-Rate limit time bars: 3-character block bars using fractional Unicode blocks (`░▏▎▍▌▋▊▉█`) showing elapsed time in the rate limit window. `t:` tracks the 5-hour window, `wk:` tracks the 7-day window. Both use the `resets_at` timestamp from Claude Code.
+Rate limit time percentages: `t:` shows elapsed time in the 5-hour window, `wk:` shows elapsed time in the 7-day window. Both use the `resets_at` timestamp from Claude Code and inherit their color from the corresponding usage percentage.
+
+Pace indicator: `▲` (over) or `▼` (under) sustainable usage pace for the 7-day window. Color reflects severity: bright green (well under), green (under), yellow (slightly over), red (significantly over).
 
 Git status symbols (starship-style):
 - `+N` — staged files
@@ -40,11 +42,13 @@ Git status symbols (starship-style):
 - `=N` — conflicted files
 - `⇡N` / `⇣N` — ahead / behind upstream
 
+Lines changed (`+<added> -<removed>`): total insertions and deletions in uncommitted changes (staged + unstaged) vs HEAD, computed via `git2::Diff::stats()`.
+
 ### Dependencies
 
 - `serde` / `serde_json` — JSON deserialization
 - `git2` — git status via libgit2 (no subprocess spawning)
-- `chrono` — local time for rate limit time bars
+- `chrono` — local time for rate limit window elapsed percentages
 - `colored` — ANSI terminal colors (forced on since stdout is piped)
 
 ### Configuration
