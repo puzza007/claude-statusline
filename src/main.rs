@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn deserializes_full_input() {
         let json = r#"{
-            "model": {"display_name": "Claude Opus 4.6"},
+            "model": {"display_name": "Claude Fable 5"},
             "workspace": {"current_dir": "/home/user/project"},
             "context_window": {"used_percentage": 42.5},
             "cost": {"total_cost_usd": 1.23},

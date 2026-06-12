@@ -7,7 +7,7 @@ Replaces the default statusline with a compact, color-coded display showing your
 ## Output
 
 ```
-~/src/my-project ⎇ main +2 !3 ?4 +42 -10 | Opus 4.6 ctx:24% 5h:12% t:40% 7d:5% wk:53% ▼ $1.47
+~/src/my-project ⎇ main +2 !3 ?4 +42 -10 | Fable 5 ctx:24% 5h:12% t:40% 7d:5% wk:53% ▼ $1.47
 ```
 
 | Segment | Description |
