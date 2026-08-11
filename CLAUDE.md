@@ -26,12 +26,14 @@ Claude Code pipes a JSON object to stdin with fields: `model`, `workspace`, `con
 ### Output Format
 
 ```
-<dir> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <pace> $<cost>
+<dir> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <pace> fb:<N>% $<cost>
 ```
 
 Rate limit time percentages: `t:` shows elapsed time in the 5-hour window, `wk:` shows elapsed time in the 7-day window. Both use the `resets_at` timestamp from Claude Code and inherit their color from the corresponding usage percentage.
 
 Pace indicator: `▲` (over) or `▼` (under) sustainable usage pace for the 7-day window. Color reflects severity: bright green (well under), green (under), yellow (slightly over), red (significantly over).
+
+Fable usage (`fb:`): read from `rate_limits.model_scoped[]`, the per-model weekly windows, matching the entry whose `display_name` contains "fable". Claude Code does not emit this field to statusline commands as of 2.1.227 — it only reaches the Agent SDK's `get_usage` response, where the schema is marked experimental — so the field is parsed with `#[serde(default)]` and the segment is hidden when absent. `model_scoped` carries the server's raw `utilization` rather than a pre-scaled `used_percentage`, so `as_percentage()` accepts either a 0-1 fraction or a 0-100 percentage.
 
 Git status symbols (starship-style):
 - `+N` — staged files

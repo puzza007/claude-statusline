@@ -51,12 +51,37 @@ struct Cost {
 struct RateLimits {
     five_hour: Option<RateLimit>,
     seven_day: Option<RateLimit>,
+    #[serde(default)]
+    model_scoped: Vec<ModelWindow>,
 }
 
 #[derive(Deserialize)]
 struct RateLimit {
     used_percentage: Option<f64>,
     resets_at: Option<i64>,
+}
+
+/// A per-model weekly window, e.g. the Fable allowance that is separate from the
+/// all-models weekly limit.
+///
+/// Claude Code does not put this in the statusline payload as of 2.1.227 — it only
+/// reaches the SDK's `get_usage` response, whose schema marks the shape experimental.
+/// Parsed optionally so the segment appears on its own if the field ever lands here.
+#[derive(Deserialize)]
+struct ModelWindow {
+    display_name: String,
+    utilization: Option<f64>,
+}
+
+/// `five_hour`/`seven_day` arrive pre-scaled as `used_percentage` (0-100), but
+/// `model_scoped` mirrors the server's raw `utilization`, which the /usage dialog
+/// renders on a 0-1 scale. Accept either, so a scale change shows 42% and not 4200%.
+fn as_percentage(utilization: f64) -> f64 {
+    if utilization <= 1.0 {
+        utilization * 100.0
+    } else {
+        utilization
+    }
 }
 
 fn shorten_home(path: &str) -> String {
@@ -265,6 +290,18 @@ fn main() {
         .map(|p| format!(" {}", pct_color(p, "7d")))
         .unwrap_or_default();
 
+    let fable = data
+        .rate_limits
+        .as_ref()
+        .and_then(|r| {
+            r.model_scoped
+                .iter()
+                .find(|m| m.display_name.to_lowercase().contains("fable"))
+        })
+        .and_then(|m| m.utilization)
+        .map(|u| format!(" {}", pct_color(as_percentage(u), "fb")))
+        .unwrap_or_default();
+
     let cost_usd = data.cost.total_cost_usd.unwrap_or(0.0);
     let cost = if cost_usd > 0.0 {
         format!(" {}", format!("${cost_usd:.2}").green())
@@ -319,7 +356,7 @@ fn main() {
     let sep = "|".dimmed();
     let model_fmt = model.cyan();
     println!(
-        "{dir_fmt}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{cost}"
+        "{dir_fmt}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{fable}{cost}"
     );
 }
 
@@ -412,6 +449,48 @@ mod tests {
         let rl = data.rate_limits.unwrap();
         assert_eq!(rl.five_hour.unwrap().used_percentage, Some(15.0));
         assert_eq!(rl.seven_day.unwrap().used_percentage, Some(42.0));
+    }
+
+    #[test]
+    fn model_scoped_absent_defaults_to_empty() {
+        let json = r#"{
+            "model": {"display_name": "Test"},
+            "workspace": {"current_dir": "/tmp"},
+            "context_window": {},
+            "cost": {},
+            "rate_limits": {"seven_day": {"used_percentage": 42.0}}
+        }"#;
+        let data: Input = serde_json::from_str(json).unwrap();
+        assert!(data.rate_limits.unwrap().model_scoped.is_empty());
+    }
+
+    #[test]
+    fn deserializes_model_scoped_windows() {
+        let json = r#"{
+            "model": {"display_name": "Claude Fable 5"},
+            "workspace": {"current_dir": "/tmp"},
+            "context_window": {},
+            "cost": {},
+            "rate_limits": {"model_scoped": [
+                {"display_name": "Opus", "utilization": 0.1},
+                {"display_name": "Fable", "utilization": 0.37, "resets_at": "2026-08-18T00:00:00Z"}
+            ]}
+        }"#;
+        let data: Input = serde_json::from_str(json).unwrap();
+        let scoped = data.rate_limits.unwrap().model_scoped;
+        assert_eq!(scoped.len(), 2);
+        assert_eq!(scoped[1].display_name, "Fable");
+        assert_eq!(scoped[1].utilization, Some(0.37));
+    }
+
+    #[test]
+    fn as_percentage_scales_fraction() {
+        assert_eq!(as_percentage(0.37), 37.0);
+    }
+
+    #[test]
+    fn as_percentage_passes_through_percent() {
+        assert_eq!(as_percentage(37.0), 37.0);
     }
 
     #[test]
