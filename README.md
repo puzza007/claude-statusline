@@ -10,9 +10,17 @@ Replaces the default statusline with a compact, color-coded display showing your
 ~/src/my-project ⎇ main +2 !3 ?4 +42 -10 | Fable 5 ctx:24% 5h:12% t:40% 7d:5% wk:53% ▼ $1.47
 ```
 
+In a Claude Code worktree session the nested `.claude/worktrees/<name>` path collapses back to the
+repo root, with the worktree name shown alongside it:
+
+```
+~/src/my-project ⑂fix-login ⎇ fix-login !1 | Fable 5 ctx:24% $0.12
+```
+
 | Segment | Description |
 |---|---|
 | Directory | Current working directory (bold blue) |
+| `⑂name` | Git worktree name, shown only in a worktree session (magenta) |
 | `⎇` | Git branch icon (dimmed) |
 | Branch | Git branch name or short SHA when detached (magenta) |
 | `=N` | Conflicted files (red) |
