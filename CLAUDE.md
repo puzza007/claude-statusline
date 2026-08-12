@@ -52,7 +52,9 @@ Lines changed (`+<added> -<removed>`): total insertions and deletions in uncommi
 ### Dependencies
 
 - `serde` / `serde_json` — JSON deserialization
-- `git2` — git status via libgit2 (no subprocess spawning)
+- `git2` — git status via libgit2 (no subprocess spawning). Uses `vendored-libgit2` so libgit2 is
+  built from source and statically linked, rather than picking up a system copy whose path breaks
+  when the package manager upgrades it.
 - `chrono` — local time for rate limit window elapsed percentages
 - `colored` — ANSI terminal colors (forced on since stdout is piped)
 
