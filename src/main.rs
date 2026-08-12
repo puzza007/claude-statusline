@@ -35,6 +35,8 @@ struct Model {
 #[derive(Deserialize)]
 struct Workspace {
     current_dir: String,
+    /// Name of the linked git worktree, sent only when the session is inside one.
+    git_worktree: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +69,13 @@ fn shorten_home(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// Trims the `.claude/worktrees/<name>` suffix Claude Code appends when it creates
+/// a worktree, leaving the repo root. Worktrees placed elsewhere are left untouched.
+fn strip_worktree_suffix<'a>(path: &'a str, name: &str) -> &'a str {
+    path.strip_suffix(&format!("/.claude/worktrees/{name}"))
+        .unwrap_or(path)
 }
 
 const STAGED: Status = Status::from_bits_truncate(
@@ -230,7 +239,13 @@ fn main() {
         Err(_) => return,
     };
 
-    let dir = shorten_home(&data.workspace.current_dir);
+    let (dir, worktree) = match data.workspace.git_worktree.as_deref() {
+        Some(name) => (
+            shorten_home(strip_worktree_suffix(&data.workspace.current_dir, name)),
+            format!(" {}{}", "\u{2442}".dimmed(), name.magenta()),
+        ),
+        None => (shorten_home(&data.workspace.current_dir), String::new()),
+    };
     let git = git_part(&data.workspace.current_dir);
 
     let ctx = data
@@ -319,7 +334,7 @@ fn main() {
     let sep = "|".dimmed();
     let model_fmt = model.cyan();
     println!(
-        "{dir_fmt}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{cost}"
+        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{cost}"
     );
 }
 
@@ -392,9 +407,38 @@ mod tests {
         }"#;
         let data: Input = serde_json::from_str(json).unwrap();
         assert_eq!(data.model.display_name, "Test");
+        assert!(data.workspace.git_worktree.is_none());
         assert!(data.context_window.used_percentage.is_none());
         assert!(data.cost.total_cost_usd.is_none());
         assert!(data.rate_limits.is_none());
+    }
+
+    #[test]
+    fn strip_worktree_suffix_trims_claude_worktree_path() {
+        assert_eq!(
+            strip_worktree_suffix("/home/user/proj/.claude/worktrees/feat", "feat"),
+            "/home/user/proj"
+        );
+    }
+
+    #[test]
+    fn strip_worktree_suffix_leaves_other_locations() {
+        assert_eq!(
+            strip_worktree_suffix("/home/user/proj-feat", "feat"),
+            "/home/user/proj-feat"
+        );
+    }
+
+    #[test]
+    fn deserializes_git_worktree() {
+        let json = r#"{
+            "model": {"display_name": "Test"},
+            "workspace": {"current_dir": "/tmp/proj/.claude/worktrees/feat", "git_worktree": "feat"},
+            "context_window": {},
+            "cost": {}
+        }"#;
+        let data: Input = serde_json::from_str(json).unwrap();
+        assert_eq!(data.workspace.git_worktree.as_deref(), Some("feat"));
     }
 
     #[test]

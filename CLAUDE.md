@@ -26,8 +26,13 @@ Claude Code pipes a JSON object to stdin with fields: `model`, `workspace`, `con
 ### Output Format
 
 ```
-<dir> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <pace> $<cost>
+<dir> ⑂<worktree> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <pace> $<cost>
 ```
+
+Worktree (`⑂<worktree>`): shown only when Claude Code sends `workspace.git_worktree`, which it does
+when the session's cwd is a linked git worktree (the value is the worktree's name). For worktrees
+Claude Code creates itself, `current_dir` is `<repo>/.claude/worktrees/<name>`; that suffix is
+stripped so the directory reads as the repo root. Worktrees located elsewhere keep their full path.
 
 Rate limit time percentages: `t:` shows elapsed time in the 5-hour window, `wk:` shows elapsed time in the 7-day window. Both use the `resets_at` timestamp from Claude Code and inherit their color from the corresponding usage percentage.
 
@@ -47,7 +52,9 @@ Lines changed (`+<added> -<removed>`): total insertions and deletions in uncommi
 ### Dependencies
 
 - `serde` / `serde_json` — JSON deserialization
-- `git2` — git status via libgit2 (no subprocess spawning)
+- `git2` — git status via libgit2 (no subprocess spawning). Uses `vendored-libgit2` so libgit2 is
+  built from source and statically linked, rather than picking up a system copy whose path breaks
+  when the package manager upgrades it.
 - `chrono` — local time for rate limit window elapsed percentages
 - `colored` — ANSI terminal colors (forced on since stdout is piped)
 
