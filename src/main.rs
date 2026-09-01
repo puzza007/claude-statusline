@@ -5,6 +5,8 @@ use git2::{Repository, Status, StatusOptions};
 use serde::Deserialize;
 use std::fmt::Write as _;
 
+mod usage;
+
 /// A fast, custom statusline for Claude Code.
 ///
 /// Reads Claude Code's statusline JSON from stdin and outputs a formatted,
@@ -16,7 +18,16 @@ use std::fmt::Write as _;
 ///   { "statusLine": { "type": "command", "command": "claude-statusline" } }
 #[derive(Parser)]
 #[command(version)]
-struct Cli {}
+struct Cli {
+    /// Skip fetching per-model weekly limits (e.g. Fable) from the usage API.
+    #[arg(long)]
+    no_usage: bool,
+
+    /// Refresh the cached usage API response and exit. Spawned in the background
+    /// by the statusline itself; not meant to be run by hand.
+    #[arg(long, hide = true)]
+    refresh_usage: bool,
+}
 
 #[derive(Deserialize)]
 struct Input {
@@ -231,7 +242,11 @@ fn window_pct(resets_at: i64, window_secs: f64) -> f64 {
 }
 
 fn main() {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    if cli.refresh_usage {
+        usage::refresh();
+        return;
+    }
     colored::control::set_override(true);
 
     let data: Input = match serde_json::from_reader(std::io::stdin().lock()) {
@@ -324,6 +339,17 @@ fn main() {
         })
         .unwrap_or_default();
 
+    // Per-model weekly limits (e.g. Fable) are not in the statusline JSON; only
+    // subscribers (who get `rate_limits`) have them, so skip the lookup otherwise.
+    let scoped = if cli.no_usage || data.rate_limits.is_none() {
+        String::new()
+    } else {
+        usage::scoped_limits()
+            .iter()
+            .map(|l| format!(" {}", pct_color(l.used_percentage, &l.name.to_lowercase())))
+            .collect()
+    };
+
     let model = data
         .model
         .display_name
@@ -334,7 +360,7 @@ fn main() {
     let sep = "|".dimmed();
     let model_fmt = model.cyan();
     println!(
-        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{cost}"
+        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{cost}"
     );
 }
 
