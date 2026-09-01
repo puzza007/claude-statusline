@@ -41,7 +41,10 @@ Pace indicator: `▲` (over) or `▼` (under) sustainable usage pace for the 7-d
 Per-model weekly limits (`<model>:<N>%`, e.g. `fable:7%`): Claude Code's statusline JSON omits these,
 so `src/usage.rs` fetches `GET https://api.anthropic.com/api/oauth/usage` (what `/usage` uses) with the
 OAuth token from the macOS Keychain item `Claude Code-credentials` (falling back to
-`$CLAUDE_CONFIG_DIR/.credentials.json`). Only `limits[]` entries with `kind: "weekly_scoped"` are shown,
+`$CLAUDE_CONFIG_DIR/.credentials.json`). The Keychain read shells out to `security` on purpose:
+Claude Code writes the item with that tool, so it is permanently on the item's access list, whereas
+a grant to this binary is tied to its ad-hoc per-build signature and is wiped each time Claude Code
+recreates the item on token refresh, which produced a Keychain prompt on every fetch. Only `limits[]` entries with `kind: "weekly_scoped"` are shown,
 labelled by `scope.model.display_name` lower-cased. The result is cached in
 `$XDG_CACHE_HOME/claude-statusline/usage.json` (default `~/.cache/...`) for 5 minutes. A stale cache
 makes the render spawn a detached `claude-statusline --refresh-usage` child (guarded by `usage.lock`)
@@ -69,7 +72,6 @@ Lines changed (`+<added> -<removed>`): total insertions and deletions in uncommi
 - `chrono` — local time for rate limit window elapsed percentages
 - `colored` — ANSI terminal colors (forced on since stdout is piped)
 - `ureq` (rustls) — the one HTTP call, made only from the background refresh child
-- `security-framework` (macOS only) — reads the Keychain without spawning `security`
 
 ### Configuration
 

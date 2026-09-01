@@ -271,12 +271,25 @@ fn read_credentials() -> Option<String> {
     keychain_credentials().or_else(file_credentials)
 }
 
+/// Reads the credentials JSON Claude Code stores in the macOS Keychain.
+///
+/// This deliberately shells out to `security` rather than using the Keychain API
+/// directly: Claude Code writes the item via `security`, so that tool is on the
+/// item's access list permanently, whereas a grant to this binary is tied to its
+/// (ad-hoc, per-build) code signature and is wiped whenever Claude Code recreates
+/// the item on token refresh, causing a password prompt on every fetch.
 #[cfg(target_os = "macos")]
 fn keychain_credentials() -> Option<String> {
-    let account = std::env::var("USER").ok()?;
-    let bytes =
-        security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, &account).ok()?;
-    String::from_utf8(bytes).ok()
+    let out = Command::new("security")
+        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8(out.stdout).ok()?.trim_end().to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
