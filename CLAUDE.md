@@ -26,7 +26,7 @@ Claude Code pipes a JSON object to stdin with fields: `model`, `workspace`, `con
 ### Output Format
 
 ```
-<dir> ⑂<worktree> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <model>:<N>% <pace> $<cost>
+<dir> ⑂<worktree> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <pace> <model>:<N>% <pace> $<cost>
 ```
 
 Worktree (`⑂<worktree>`): shown only when Claude Code sends `workspace.git_worktree`, which it does
@@ -45,7 +45,8 @@ OAuth token from the macOS Keychain item `Claude Code-credentials` (falling back
 Claude Code writes the item with that tool, so it is permanently on the item's access list, whereas
 a grant to this binary is tied to its ad-hoc per-build signature and is wiped each time Claude Code
 recreates the item on token refresh, which produced a Keychain prompt on every fetch. Only `limits[]` entries with `kind: "weekly_scoped"` are shown,
-labelled by `scope.model.display_name` lower-cased. The result is cached in
+labelled by `scope.model.display_name` lower-cased, each followed by its own pace arrow computed
+from that bucket's `resets_at` over a 7-day window. The result is cached in
 `$XDG_CACHE_HOME/claude-statusline/usage.json` (default `~/.cache/...`) for 5 minutes. A stale cache
 makes the render spawn a detached `claude-statusline --refresh-usage` child (guarded by `usage.lock`)
 and continue with the cached values, so the render path never touches the network. Expired tokens are

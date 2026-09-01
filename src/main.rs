@@ -241,6 +241,24 @@ fn window_pct(resets_at: i64, window_secs: f64) -> f64 {
     elapsed / window_secs * 100.0
 }
 
+/// Sustainable pace indicator for a weekly window: `▲` when usage is ahead of
+/// elapsed time, `▼` when behind. Color reflects how far off pace it is.
+fn pace_arrow(usage_pct: f64, time_pct: f64) -> String {
+    let delta = usage_pct - time_pct;
+    let arrow = if delta > 20.0 {
+        "▲".red()
+    } else if delta > 0.0 {
+        "▲".yellow()
+    } else if delta > -20.0 {
+        "▼".green()
+    } else {
+        "▼".bright_green()
+    };
+    format!(" {arrow}")
+}
+
+const WEEK_SECS: f64 = 7.0 * 24.0 * 3600.0;
+
 fn main() {
     let cli = Cli::parse();
     if cli.refresh_usage {
@@ -311,35 +329,16 @@ fn main() {
         _ => String::new(),
     };
 
-    // Elapsed time in the 7-day window, plus a sustainable pace indicator
-    // (usage% vs time elapsed%). Rendered as two segments so per-model limits
-    // can sit between them.
-    let (week, pace) = seven_day
+    let week = seven_day
         .and_then(|r| r.resets_at)
         .map(|ts| {
-            let time_pct = window_pct(ts, 7.0 * 24.0 * 3600.0);
+            let time_pct = window_pct(ts, WEEK_SECS);
             let color_pct = seven_day_pct.unwrap_or(0.0);
-            let week = format!(
-                " {}",
-                colorize_by_pct(color_pct, &format!("wk:{time_pct:.0}%"))
-            );
-            let pace = match seven_day_pct {
-                Some(usage) => {
-                    let delta = usage - time_pct;
-                    let arrow = if delta > 20.0 {
-                        "▲".red()
-                    } else if delta > 0.0 {
-                        "▲".yellow()
-                    } else if delta > -20.0 {
-                        "▼".green()
-                    } else {
-                        "▼".bright_green()
-                    };
-                    format!(" {arrow}")
-                }
-                None => String::new(),
-            };
-            (week, pace)
+            let wk_text = colorize_by_pct(color_pct, &format!("wk:{time_pct:.0}%"));
+            let pace = seven_day_pct
+                .map(|usage| pace_arrow(usage, time_pct))
+                .unwrap_or_default();
+            format!(" {wk_text}{pace}")
         })
         .unwrap_or_default();
 
@@ -350,7 +349,14 @@ fn main() {
     } else {
         usage::scoped_limits()
             .iter()
-            .map(|l| format!(" {}", pct_color(l.used_percentage, &l.name.to_lowercase())))
+            .map(|l| {
+                let text = pct_color(l.used_percentage, &l.name.to_lowercase());
+                let pace = l
+                    .resets_at
+                    .map(|ts| pace_arrow(l.used_percentage, window_pct(ts, WEEK_SECS)))
+                    .unwrap_or_default();
+                format!(" {text}{pace}")
+            })
             .collect()
     };
 
@@ -364,7 +370,7 @@ fn main() {
     let sep = "|".dimmed();
     let model_fmt = model.cyan();
     println!(
-        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{pace}{cost}"
+        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{cost}"
     );
 }
 
@@ -540,6 +546,23 @@ mod tests {
         let resets_at = Local::now().timestamp() + (2.5 * 3600.0) as i64;
         let pct = window_pct(resets_at, 5.0 * 3600.0);
         assert!((pct - 50.0).abs() < 1.0, "expected ~50%, got: {pct}");
+    }
+
+    #[test]
+    fn pace_arrow_reflects_usage_vs_time() {
+        force_colors();
+        assert!(
+            pace_arrow(80.0, 50.0).contains("▲") && pace_arrow(80.0, 50.0).contains("\x1b[31m")
+        );
+        assert!(
+            pace_arrow(55.0, 50.0).contains("▲") && pace_arrow(55.0, 50.0).contains("\x1b[33m")
+        );
+        assert!(
+            pace_arrow(45.0, 50.0).contains("▼") && pace_arrow(45.0, 50.0).contains("\x1b[32m")
+        );
+        assert!(
+            pace_arrow(10.0, 50.0).contains("▼") && pace_arrow(10.0, 50.0).contains("\x1b[92m")
+        );
     }
 
     #[test]

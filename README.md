@@ -7,7 +7,7 @@ Replaces the default statusline with a compact, color-coded display showing your
 ## Output
 
 ```
-~/src/my-project ⎇ main +2 !3 ?4 +42 -10 | Fable 5 ctx:24% 5h:12% t:40% 7d:5% wk:53% fable:7% ▼ $1.47
+~/src/my-project ⎇ main +2 !3 ?4 +42 -10 | Fable 5 ctx:24% 5h:12% t:40% 7d:5% wk:53% ▼ fable:7% ▼ $1.47
 ```
 
 In a Claude Code worktree session the nested `.claude/worktrees/<name>` path collapses back to the
@@ -36,8 +36,8 @@ repo root, with the worktree name shown alongside it:
 | `t:N%` | Elapsed time in the 5-hour rate limit window |
 | `7d:N%` | 7-day rate limit usage — green/yellow/red at 50%/80% |
 | `wk:N%` | Elapsed time in the 7-day rate limit window |
-| `fable:N%` | Per-model weekly limit usage (one per model bucket, e.g. Fable) — green/yellow/red at 50%/80% |
 | `▼` / `▲` | Weekly pace indicator — under/over sustainable usage rate |
+| `fable:N% ▼` | Per-model weekly limit usage (one per model bucket, e.g. Fable) with its own pace indicator |
 | `$N.NN` | Session cost in USD (green) |
 | `+N -N` | Uncommitted lines added (green) / removed (red) vs HEAD |
 
