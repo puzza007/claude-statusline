@@ -26,7 +26,7 @@ Claude Code pipes a JSON object to stdin with fields: `model`, `workspace`, `con
 ### Output Format
 
 ```
-<dir> ⑂<worktree> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <pace> <model>:<N>% $<cost>
+<dir> ⑂<worktree> ⎇ <branch> +<staged> !<modified> ✘<deleted> ?<untracked> $<stashes> ⇡<ahead> ⇣<behind> +<added> -<removed> | <model> ctx:<N>% 5h:<N>% t:<N>% 7d:<N>% wk:<N>% <model>:<N>% <pace> $<cost>
 ```
 
 Worktree (`⑂<worktree>`): shown only when Claude Code sends `workspace.git_worktree`, which it does

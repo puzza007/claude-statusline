@@ -311,31 +311,35 @@ fn main() {
         _ => String::new(),
     };
 
-    let week = seven_day
+    // Elapsed time in the 7-day window, plus a sustainable pace indicator
+    // (usage% vs time elapsed%). Rendered as two segments so per-model limits
+    // can sit between them.
+    let (week, pace) = seven_day
         .and_then(|r| r.resets_at)
         .map(|ts| {
             let time_pct = window_pct(ts, 7.0 * 24.0 * 3600.0);
             let color_pct = seven_day_pct.unwrap_or(0.0);
-            let wk_text = colorize_by_pct(color_pct, &format!("wk:{time_pct:.0}%"));
-
-            // Sustainable pace indicator: usage% vs time elapsed%
+            let week = format!(
+                " {}",
+                colorize_by_pct(color_pct, &format!("wk:{time_pct:.0}%"))
+            );
             let pace = match seven_day_pct {
                 Some(usage) => {
                     let delta = usage - time_pct;
-                    if delta > 20.0 {
-                        "▲".red().to_string()
+                    let arrow = if delta > 20.0 {
+                        "▲".red()
                     } else if delta > 0.0 {
-                        "▲".yellow().to_string()
+                        "▲".yellow()
                     } else if delta > -20.0 {
-                        "▼".green().to_string()
+                        "▼".green()
                     } else {
-                        "▼".bright_green().to_string()
-                    }
+                        "▼".bright_green()
+                    };
+                    format!(" {arrow}")
                 }
                 None => String::new(),
             };
-
-            format!(" {wk_text} {pace}")
+            (week, pace)
         })
         .unwrap_or_default();
 
@@ -360,7 +364,7 @@ fn main() {
     let sep = "|".dimmed();
     let model_fmt = model.cyan();
     println!(
-        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{cost}"
+        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{pace}{cost}"
     );
 }
 
