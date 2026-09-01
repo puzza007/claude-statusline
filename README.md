@@ -7,7 +7,7 @@ Replaces the default statusline with a compact, color-coded display showing your
 ## Output
 
 ```
-~/src/my-project ⎇ main +2 !3 ?4 +42 -10 | Fable 5 ctx:24% 5h:12% t:40% 7d:5% wk:53% ▼ $1.47
+~/src/my-project ⎇ main +2 !3 ?4 +42 -10 | Fable 5 ctx:24% 5h:12% t:40% 7d:5% wk:53% ▼ fable:7% ▼ $1.47
 ```
 
 In a Claude Code worktree session the nested `.claude/worktrees/<name>` path collapses back to the
@@ -37,6 +37,7 @@ repo root, with the worktree name shown alongside it:
 | `7d:N%` | 7-day rate limit usage — green/yellow/red at 50%/80% |
 | `wk:N%` | Elapsed time in the 7-day rate limit window |
 | `▼` / `▲` | Weekly pace indicator — under/over sustainable usage rate |
+| `fable:N% ▼` | Per-model weekly limit usage (one per model bucket, e.g. Fable) with its own pace indicator |
 | `$N.NN` | Session cost in USD (green) |
 | `+N -N` | Uncommitted lines added (green) / removed (red) vs HEAD |
 
@@ -58,6 +59,15 @@ Add to `~/.claude/settings.json`:
   }
 }
 ```
+
+### Per-model limits
+
+Claude Code's statusline JSON does not include per-model weekly limits such as the Fable bucket, so
+the statusline fetches them itself from the same usage endpoint the `/usage` command uses, with the
+OAuth token Claude Code stores in the macOS Keychain (or `~/.claude/.credentials.json` elsewhere).
+The response is cached in `~/.cache/claude-statusline/usage.json` for 5 minutes, and refreshes run in
+a detached background process so rendering never waits on the network. Pass `--no-usage` in the
+command above to turn this off.
 
 ## License
 
