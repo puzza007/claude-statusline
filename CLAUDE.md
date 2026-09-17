@@ -12,7 +12,11 @@ cargo build --release
 cargo install --path .
 
 # Lint and format
-cargo clippy && cargo fmt
+cargo clippy --workspace && cargo fmt
+
+# Report service
+docker compose up -d --build   # http://localhost:8787
+cargo run -p claude-statusline-report
 ```
 
 ## Architecture
@@ -53,6 +57,39 @@ and continue with the cached values, so the render path never touches the networ
 never refreshed here since Claude Code owns and rotates them. `--no-usage` disables the feature; the
 lookup is also skipped when the input has no `rate_limits` (API-key users have no such buckets).
 
+History (`src/history.rs`): every render is recorded to an SQLite database at
+`$XDG_DATA_HOME/claude-statusline/history.db` (default `~/.local/share/...`) via `rusqlite` with the
+`bundled` feature (statically linked, like libgit2). Three tables: `samples` (one row per observed
+state change per session, plus a heartbeat row every 5 idle minutes), `sessions` (first/last seen,
+cwd, worktree, Claude Code version, and the fingerprint of the last sample used for change
+detection) and `usage_limits` (one row per model per successful usage API fetch, written by the
+`--refresh-usage` child). Change detection is a hash of every sample field except timestamps, stored
+in `sessions.last_fp`, so the thousands of identical renders per turn collapse into one row. Recording
+runs after the line is printed, uses WAL + a 50 ms busy timeout so concurrent sessions can share the
+file, and swallows every error so the render is never broken. Schema changes are appended to `MIGRATIONS`; each step is
+applied in its own transaction together with the `PRAGMA user_version` bump so an interrupted step
+is retried whole. `GitStatus` (in `main.rs`, including the uncommitted diff line counts) is hashed
+into the fingerprint; `Sample::fingerprint` destructures every field so adding one is a compile
+error until it is placed in or explicitly outside the hash. `samples.cwd` is
+recorded per row (not just the latest on `sessions`) so a branch is always attributable to a repo. `--no-history` disables recording and is forwarded to the refresh child.
+
+Report (`report/`, workspace member `claude-statusline-report`): an axum service that serves the
+history as a chart page. `report/template.html` is the page; it has no document skeleton because
+the same file is published as a Claude artifact (which wraps it) and the server adds its own
+`<!doctype>`/`<head>`/`<body>`. The server replaces the single `__DATA__` token with JSON from three
+queries (`samples`, `usage_limits`, `sessions`, aliases as the template expects) and escapes every `<` in
+the JSON as `\u003c` so no value can end the script block. The database is opened `SQLITE_OPEN_READ_ONLY` per
+request with a 500 ms busy timeout; `?days=N` (default 30, `all`) bounds the rows so the page does
+not grow without limit. `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
+is static) into a `scratch` image (a stub `src/main.rs` stands in for the statusline package so the
+workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data directory at
+`/data`, which must be the directory rather than the file so SQLite can use the `-wal`/`-shm`
+files. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
+categorical slots and the rest are muted "other", tables only.
+
+`--report-url <url>` appends `↗` wrapped in an OSC 8 hyperlink (`ESC ] 8 ; ; url ST … ESC ] 8 ; ; ST`)
+so the report is one click away in terminals that support it.
+
 Git status symbols (starship-style):
 - `+N` — staged files
 - `!N` — modified files
@@ -67,6 +104,7 @@ Lines changed (`+<added> -<removed>`): total insertions and deletions in uncommi
 ### Dependencies
 
 - `serde` / `serde_json` — JSON deserialization
+- `rusqlite` (bundled) — the history database; SQLite is built from source and statically linked
 - `git2` — git status via libgit2 (no subprocess spawning). Uses `vendored-libgit2` so libgit2 is
   built from source and statically linked, rather than picking up a system copy whose path breaks
   when the package manager upgrades it.

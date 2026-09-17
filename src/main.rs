@@ -4,8 +4,12 @@ use colored::Colorize;
 use git2::{Repository, Status, StatusOptions};
 use serde::Deserialize;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
+mod history;
 mod usage;
+
+use history::Sample;
 
 /// A fast, custom statusline for Claude Code.
 ///
@@ -23,14 +27,33 @@ struct Cli {
     #[arg(long)]
     no_usage: bool,
 
+    /// Don't record what the statusline sees to the local history database
+    /// ($XDG_DATA_HOME/claude-statusline/history.db).
+    #[arg(long)]
+    no_history: bool,
+
+    /// Append a clickable link to the history report (e.g. http://localhost:8787),
+    /// as an OSC 8 terminal hyperlink.
+    #[arg(long)]
+    report_url: Option<String>,
+
     /// Refresh the cached usage API response and exit. Spawned in the background
     /// by the statusline itself; not meant to be run by hand.
     #[arg(long, hide = true)]
     refresh_usage: bool,
 }
 
+/// Wraps `text` in an OSC 8 hyperlink to `url`. Terminals without support show
+/// the text alone.
+fn hyperlink(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
 #[derive(Deserialize)]
 struct Input {
+    session_id: Option<String>,
+    /// Claude Code's version.
+    version: Option<String>,
     model: Model,
     workspace: Workspace,
     context_window: ContextWindow,
@@ -40,6 +63,7 @@ struct Input {
 
 #[derive(Deserialize)]
 struct Model {
+    id: Option<String>,
     display_name: String,
 }
 
@@ -53,11 +77,20 @@ struct Workspace {
 #[derive(Deserialize)]
 struct ContextWindow {
     used_percentage: Option<f64>,
+    total_input_tokens: Option<i64>,
+    total_output_tokens: Option<i64>,
+    context_window_size: Option<i64>,
 }
 
 #[derive(Deserialize)]
 struct Cost {
     total_cost_usd: Option<f64>,
+    total_duration_ms: Option<i64>,
+    total_api_duration_ms: Option<i64>,
+    /// Lines Claude Code itself has added/removed over the session (cumulative),
+    /// as opposed to the uncommitted diff shown in the statusline.
+    total_lines_added: Option<i64>,
+    total_lines_removed: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +103,20 @@ struct RateLimits {
 struct RateLimit {
     used_percentage: Option<f64>,
     resets_at: Option<i64>,
+}
+
+/// Unix epoch seconds.
+pub(crate) fn now_secs() -> i64 {
+    Local::now().timestamp()
+}
+
+/// `$VAR/claude-statusline`, or `$HOME/<fallback>/claude-statusline` when the XDG
+/// variable is unset.
+pub(crate) fn xdg_dir(var: &str, fallback: &str) -> Option<PathBuf> {
+    let base = std::env::var_os(var)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(fallback)))?;
+    Some(base.join("claude-statusline"))
 }
 
 fn shorten_home(path: &str) -> String {
@@ -101,17 +148,28 @@ const WT_MODIFIED: Status = Status::from_bits_truncate(
     Status::WT_MODIFIED.bits() | Status::WT_RENAMED.bits() | Status::WT_TYPECHANGE.bits(),
 );
 
-fn git_part(dir: &str) -> String {
-    let mut repo = match Repository::discover(dir) {
-        Ok(r) => r,
-        Err(_) => return String::new(),
-    };
+/// Git state of the working tree as the statusline counts it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) struct GitStatus {
+    pub branch: String,
+    pub staged: u32,
+    pub modified: u32,
+    pub deleted: u32,
+    pub untracked: u32,
+    pub conflicted: u32,
+    pub stashes: u32,
+    pub ahead: u32,
+    pub behind: u32,
+    /// Insertions and deletions in uncommitted changes (staged + unstaged) vs HEAD.
+    pub diff_added: u32,
+    pub diff_removed: u32,
+}
+
+fn git_status(dir: &str) -> Option<GitStatus> {
+    let mut repo = Repository::discover(dir).ok()?;
 
     let (is_branch, branch) = {
-        let head = match repo.head() {
-            Ok(h) => h,
-            Err(_) => return String::new(),
-        };
+        let head = repo.head().ok()?;
         let is_branch = head.is_branch();
         let branch = if is_branch {
             head.shorthand().unwrap_or("").to_string()
@@ -124,83 +182,96 @@ fn git_part(dir: &str) -> String {
     };
 
     if branch.is_empty() {
-        return String::new();
+        return None;
     }
 
-    let mut flags = String::new();
+    let mut status = GitStatus {
+        branch,
+        ..Default::default()
+    };
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).exclude_submodules(true);
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        let mut staged = 0u32;
-        let mut modified = 0u32;
-        let mut deleted = 0u32;
-        let mut untracked = 0u32;
-        let mut conflicted = 0u32;
-
         for entry in statuses.iter() {
             let s = entry.status();
             if s.contains(Status::CONFLICTED) {
-                conflicted += 1;
+                status.conflicted += 1;
             }
             if s.intersects(STAGED) {
-                staged += 1;
+                status.staged += 1;
             }
             if s.intersects(WT_MODIFIED) {
-                modified += 1;
+                status.modified += 1;
             }
             if s.intersects(Status::WT_DELETED) || s.intersects(Status::INDEX_DELETED) {
-                deleted += 1;
+                status.deleted += 1;
             }
             if s.contains(Status::WT_NEW) {
-                untracked += 1;
+                status.untracked += 1;
             }
-        }
-        if conflicted > 0 {
-            write!(flags, " {}", format!("={conflicted}").red()).ok();
-        }
-        if staged > 0 {
-            write!(flags, " {}", format!("+{staged}").green()).ok();
-        }
-        if modified > 0 {
-            write!(flags, " {}", format!("!{modified}").yellow()).ok();
-        }
-        if deleted > 0 {
-            write!(flags, " {}", format!("✘{deleted}").red()).ok();
-        }
-        if untracked > 0 {
-            write!(flags, " {}", format!("?{untracked}").blue()).ok();
         }
     }
 
-    if let Ok(stashes) = stash_count(&mut repo)
-        && stashes > 0
-    {
-        write!(flags, " {}", format!("${stashes}").cyan()).ok();
+    status.stashes = stash_count(&mut repo).unwrap_or(0);
+
+    if let Some((added, removed)) = diff_lines(&repo) {
+        status.diff_added = added as u32;
+        status.diff_removed = removed as u32;
     }
 
     if is_branch {
-        let upstream_ref = format!("refs/heads/{branch}");
+        let upstream_ref = format!("refs/heads/{}", status.branch);
         if let Ok(local_oid) = repo.refname_to_id("HEAD")
             && let Ok(upstream_name) = repo.branch_upstream_name(&upstream_ref)
             && let Some(name) = upstream_name.as_str()
             && let Ok(upstream_oid) = repo.refname_to_id(name)
             && let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid)
         {
-            if ahead > 0 {
-                write!(flags, " {}", format!("⇡{ahead}").green()).ok();
-            }
-            if behind > 0 {
-                write!(flags, " {}", format!("⇣{behind}").red()).ok();
-            }
+            status.ahead = ahead as u32;
+            status.behind = behind as u32;
         }
     }
 
-    format!(" {} {}{}", "\u{2387}".dimmed(), branch.magenta(), flags,)
+    Some(status)
+}
+
+fn render_git(status: &GitStatus) -> String {
+    let mut flags = String::new();
+    if status.conflicted > 0 {
+        write!(flags, " {}", format!("={}", status.conflicted).red()).ok();
+    }
+    if status.staged > 0 {
+        write!(flags, " {}", format!("+{}", status.staged).green()).ok();
+    }
+    if status.modified > 0 {
+        write!(flags, " {}", format!("!{}", status.modified).yellow()).ok();
+    }
+    if status.deleted > 0 {
+        write!(flags, " {}", format!("✘{}", status.deleted).red()).ok();
+    }
+    if status.untracked > 0 {
+        write!(flags, " {}", format!("?{}", status.untracked).blue()).ok();
+    }
+    if status.stashes > 0 {
+        write!(flags, " {}", format!("${}", status.stashes).cyan()).ok();
+    }
+    if status.ahead > 0 {
+        write!(flags, " {}", format!("⇡{}", status.ahead).green()).ok();
+    }
+    if status.behind > 0 {
+        write!(flags, " {}", format!("⇣{}", status.behind).red()).ok();
+    }
+    format!(
+        " {} {}{}",
+        "\u{2387}".dimmed(),
+        status.branch.magenta(),
+        flags
+    )
 }
 
 fn stash_count(repo: &mut Repository) -> Result<u32, git2::Error> {
-    let mut count = 0u32;
+    let mut count = 0;
     repo.stash_foreach(|_, _, _| {
         count += 1;
         true
@@ -209,8 +280,7 @@ fn stash_count(repo: &mut Repository) -> Result<u32, git2::Error> {
 }
 
 /// Returns (insertions, deletions) for uncommitted changes (staged + unstaged) vs HEAD.
-fn git_lines(dir: &str) -> Option<(usize, usize)> {
-    let repo = Repository::discover(dir).ok()?;
+fn diff_lines(repo: &Repository) -> Option<(usize, usize)> {
     let head = repo.head().ok()?.peel_to_tree().ok()?;
     let diff = repo
         .diff_tree_to_workdir_with_index(Some(&head), None)
@@ -262,7 +332,11 @@ const WEEK_SECS: f64 = 7.0 * 24.0 * 3600.0;
 fn main() {
     let cli = Cli::parse();
     if cli.refresh_usage {
-        usage::refresh();
+        if let Some(limits) = usage::refresh()
+            && !cli.no_history
+        {
+            history::record_limits(&limits);
+        }
         return;
     }
     colored::control::set_override(true);
@@ -279,7 +353,8 @@ fn main() {
         ),
         None => (shorten_home(&data.workspace.current_dir), String::new()),
     };
-    let git = git_part(&data.workspace.current_dir);
+    let git_status = git_status(&data.workspace.current_dir);
+    let git = git_status.as_ref().map(render_git).unwrap_or_default();
 
     let ctx = data
         .context_window
@@ -320,7 +395,7 @@ fn main() {
         String::new()
     };
 
-    let lines = match git_lines(&data.workspace.current_dir) {
+    let lines = match git_status.as_ref().map(|g| (g.diff_added, g.diff_removed)) {
         Some((added, removed)) if added > 0 || removed > 0 => format!(
             " {} {}",
             format!("+{added}").green(),
@@ -347,7 +422,7 @@ fn main() {
     let scoped = if cli.no_usage || data.rate_limits.is_none() {
         String::new()
     } else {
-        usage::scoped_limits()
+        usage::scoped_limits(!cli.no_history)
             .iter()
             .map(|l| {
                 let text = pct_color(l.used_percentage, &l.name.to_lowercase());
@@ -366,12 +441,46 @@ fn main() {
         .split_once(" (")
         .map(|(name, _)| name)
         .unwrap_or(&data.model.display_name);
+    let report = cli
+        .report_url
+        .as_deref()
+        .map(|url| format!(" {}", hyperlink(url, &"\u{2197}".dimmed().to_string())))
+        .unwrap_or_default();
+
     let dir_fmt = dir.bold().blue();
     let sep = "|".dimmed();
     let model_fmt = model.cyan();
     println!(
-        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{cost}"
+        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{cost}{report}"
     );
+
+    // Record after printing so the render is never held up by the database.
+    if !cli.no_history
+        && let Some(session_id) = data.session_id
+    {
+        history::record(&Sample {
+            session_id,
+            cwd: data.workspace.current_dir,
+            worktree: data.workspace.git_worktree,
+            cc_version: data.version,
+            model: data.model.display_name,
+            model_id: data.model.id,
+            ctx_pct: data.context_window.used_percentage,
+            input_tokens: data.context_window.total_input_tokens,
+            output_tokens: data.context_window.total_output_tokens,
+            ctx_size: data.context_window.context_window_size,
+            cost_usd: data.cost.total_cost_usd,
+            duration_ms: data.cost.total_duration_ms,
+            api_ms: data.cost.total_api_duration_ms,
+            cc_lines_added: data.cost.total_lines_added,
+            cc_lines_removed: data.cost.total_lines_removed,
+            git: git_status,
+            five_hour_pct,
+            five_hour_resets: five_hour.and_then(|r| r.resets_at),
+            seven_day_pct,
+            seven_day_resets: seven_day.and_then(|r| r.resets_at),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -385,6 +494,10 @@ mod tests {
         colored::control::set_override(true);
     }
 
+    fn git_part(dir: &str) -> String {
+        git_status(dir).as_ref().map(render_git).unwrap_or_default()
+    }
+
     fn init_test_repo() -> (TempDir, Repository, Oid) {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
@@ -396,6 +509,14 @@ mod tests {
                 .unwrap()
         };
         (tmp, repo, oid)
+    }
+
+    #[test]
+    fn hyperlink_wraps_text_in_osc8() {
+        assert_eq!(
+            hyperlink("http://x", "go"),
+            "\x1b]8;;http://x\x1b\\go\x1b]8;;\x1b\\"
+        );
     }
 
     #[test]

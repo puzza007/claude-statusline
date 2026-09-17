@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+use crate::{now_secs, xdg_dir};
 
 /// How long a cached response is considered fresh.
 pub const TTL: Duration = Duration::from_secs(5 * 60);
@@ -35,23 +37,13 @@ pub struct ScopedLimit {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Cache {
     /// Unix epoch seconds of the last fetch attempt, successful or not.
-    fetched_at: u64,
+    fetched_at: i64,
     #[serde(default)]
     limits: Vec<ScopedLimit>,
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn cache_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(base.join("claude-statusline"))
+    xdg_dir("XDG_CACHE_HOME", ".cache")
 }
 
 fn read_cache(path: &Path) -> Option<Cache> {
@@ -68,19 +60,22 @@ fn write_cache(path: &Path, cache: &Cache) -> std::io::Result<()> {
     fs::rename(tmp, path)
 }
 
-fn is_fresh(cache: &Cache, now: u64) -> bool {
-    now.saturating_sub(cache.fetched_at) < TTL.as_secs()
+fn is_fresh(cache: &Cache, now: i64) -> bool {
+    now - cache.fetched_at < TTL.as_secs() as i64
 }
 
 /// Returns the cached per-model limits, kicking off a background refresh when the
 /// cache is missing or older than [`TTL`]. Never blocks on the network.
-pub fn scoped_limits() -> Vec<ScopedLimit> {
+///
+/// `record_history` is forwarded to the refresh child so it knows whether to log
+/// what it fetches.
+pub fn scoped_limits(record_history: bool) -> Vec<ScopedLimit> {
     let Some(dir) = cache_dir() else {
         return Vec::new();
     };
     let cache = read_cache(&dir.join("usage.json")).unwrap_or_default();
     if !is_fresh(&cache, now_secs()) {
-        spawn_refresh(&dir);
+        spawn_refresh(&dir, record_history);
     }
     cache.limits
 }
@@ -123,7 +118,7 @@ impl Drop for RefreshLock {
     }
 }
 
-fn spawn_refresh(dir: &Path) {
+fn spawn_refresh(dir: &Path, record_history: bool) {
     // Another render (possibly from a different session) already has a refresh
     // in flight; the child takes the lock itself, this is just to avoid a pile-up.
     if lock_is_live(&lock_path(dir)) {
@@ -133,8 +128,11 @@ fn spawn_refresh(dir: &Path) {
         return;
     };
     let mut cmd = Command::new(exe);
-    cmd.arg("--refresh-usage")
-        .stdin(Stdio::null())
+    cmd.arg("--refresh-usage");
+    if !record_history {
+        cmd.arg("--no-history");
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     #[cfg(unix)]
@@ -146,28 +144,26 @@ fn spawn_refresh(dir: &Path) {
     let _ = cmd.spawn();
 }
 
-/// Fetches the usage endpoint and rewrites the cache. Run in the detached child.
+/// Fetches the usage endpoint and rewrites the cache, returning what was fetched.
+/// Run in the detached child.
 ///
 /// On any failure the cache's timestamp is still bumped (keeping the previous
 /// limits) so a persistent error is retried once per [`TTL`] rather than on every
 /// render.
-pub fn refresh() {
-    let Some(dir) = cache_dir() else {
-        return;
-    };
-    let Some(_lock) = RefreshLock::acquire(&dir) else {
-        return;
-    };
+pub fn refresh() -> Option<Vec<ScopedLimit>> {
+    let dir = cache_dir()?;
+    let _lock = RefreshLock::acquire(&dir)?;
     let path = dir.join("usage.json");
     let previous = read_cache(&path).unwrap_or_default();
-    let limits = fetch_scoped_limits().unwrap_or(previous.limits);
+    let fetched = fetch_scoped_limits();
     let _ = write_cache(
         &path,
         &Cache {
             fetched_at: now_secs(),
-            limits,
+            limits: fetched.clone().unwrap_or(previous.limits),
         },
     );
+    fetched
 }
 
 fn fetch_scoped_limits() -> Option<Vec<ScopedLimit>> {
@@ -255,7 +251,7 @@ struct OAuth {
 /// that token and rotates it itself.
 fn access_token() -> Option<String> {
     let raw = read_credentials()?;
-    token_from_credentials(&raw, now_secs() as i64 * 1000)
+    token_from_credentials(&raw, now_secs() * 1000)
 }
 
 fn token_from_credentials(raw: &str, now_ms: i64) -> Option<String> {
@@ -355,8 +351,8 @@ mod tests {
             fetched_at: 1000,
             limits: vec![],
         };
-        assert!(is_fresh(&cache, 1000 + TTL.as_secs() - 1));
-        assert!(!is_fresh(&cache, 1000 + TTL.as_secs()));
+        assert!(is_fresh(&cache, 1000 + TTL.as_secs() as i64 - 1));
+        assert!(!is_fresh(&cache, 1000 + TTL.as_secs() as i64));
         assert!(!is_fresh(&Cache::default(), 1000));
     }
 
