@@ -69,6 +69,26 @@ The response is cached in `~/.cache/claude-statusline/usage.json` for 5 minutes,
 a detached background process so rendering never waits on the network. Pass `--no-usage` in the
 command above to turn this off.
 
+### History
+
+Everything the statusline sees is recorded to an SQLite database at
+`~/.local/share/claude-statusline/history.db` (`$XDG_DATA_HOME` is honoured) so it can be queried
+later. A row is written to `samples` only when something changed since the session's last row (or
+after 5 idle minutes), so the near-continuous renders Claude Code triggers collapse into roughly one
+row per turn. `sessions` tracks first/last seen per session and `usage_limits` logs each per-model
+limit fetch. Pass `--no-history` to turn this off.
+
+```sh
+# cost per day
+sqlite3 ~/.local/share/claude-statusline/history.db \
+  "select date(ts,'unixepoch','localtime') d, round(sum(c),2) from
+     (select session_id, max(cost_usd) c from samples group by 1) join
+     (select session_id, min(ts) ts from samples group by 1) using (session_id) group by d"
+
+# export to Parquet with DuckDB
+duckdb -c "ATTACH '$HOME/.local/share/claude-statusline/history.db' AS h (TYPE sqlite); COPY h.samples TO 'samples.parquet'"
+```
+
 ## License
 
 MIT

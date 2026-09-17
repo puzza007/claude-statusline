@@ -6,7 +6,10 @@ use serde::Deserialize;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+mod history;
 mod usage;
+
+use history::Sample;
 
 /// A fast, custom statusline for Claude Code.
 ///
@@ -24,6 +27,11 @@ struct Cli {
     #[arg(long)]
     no_usage: bool,
 
+    /// Don't record what the statusline sees to the local history database
+    /// ($XDG_DATA_HOME/claude-statusline/history.db).
+    #[arg(long)]
+    no_history: bool,
+
     /// Refresh the cached usage API response and exit. Spawned in the background
     /// by the statusline itself; not meant to be run by hand.
     #[arg(long, hide = true)]
@@ -32,6 +40,9 @@ struct Cli {
 
 #[derive(Deserialize)]
 struct Input {
+    session_id: Option<String>,
+    /// Claude Code's version.
+    version: Option<String>,
     model: Model,
     workspace: Workspace,
     context_window: ContextWindow,
@@ -41,6 +52,7 @@ struct Input {
 
 #[derive(Deserialize)]
 struct Model {
+    id: Option<String>,
     display_name: String,
 }
 
@@ -54,11 +66,20 @@ struct Workspace {
 #[derive(Deserialize)]
 struct ContextWindow {
     used_percentage: Option<f64>,
+    total_input_tokens: Option<i64>,
+    total_output_tokens: Option<i64>,
+    context_window_size: Option<i64>,
 }
 
 #[derive(Deserialize)]
 struct Cost {
     total_cost_usd: Option<f64>,
+    total_duration_ms: Option<i64>,
+    total_api_duration_ms: Option<i64>,
+    /// Lines Claude Code itself has added/removed over the session (cumulative),
+    /// as opposed to the uncommitted diff shown in the statusline.
+    total_lines_added: Option<i64>,
+    total_lines_removed: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -300,7 +321,11 @@ const WEEK_SECS: f64 = 7.0 * 24.0 * 3600.0;
 fn main() {
     let cli = Cli::parse();
     if cli.refresh_usage {
-        usage::refresh();
+        if let Some(limits) = usage::refresh()
+            && !cli.no_history
+        {
+            history::record_limits(&limits);
+        }
         return;
     }
     colored::control::set_override(true);
@@ -386,7 +411,7 @@ fn main() {
     let scoped = if cli.no_usage || data.rate_limits.is_none() {
         String::new()
     } else {
-        usage::scoped_limits()
+        usage::scoped_limits(!cli.no_history)
             .iter()
             .map(|l| {
                 let text = pct_color(l.used_percentage, &l.name.to_lowercase());
@@ -411,6 +436,34 @@ fn main() {
     println!(
         "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{cost}"
     );
+
+    // Record after printing so the render is never held up by the database.
+    if !cli.no_history
+        && let Some(session_id) = data.session_id
+    {
+        history::record(&Sample {
+            session_id,
+            cwd: data.workspace.current_dir,
+            worktree: data.workspace.git_worktree,
+            cc_version: data.version,
+            model: data.model.display_name,
+            model_id: data.model.id,
+            ctx_pct: data.context_window.used_percentage,
+            input_tokens: data.context_window.total_input_tokens,
+            output_tokens: data.context_window.total_output_tokens,
+            ctx_size: data.context_window.context_window_size,
+            cost_usd: data.cost.total_cost_usd,
+            duration_ms: data.cost.total_duration_ms,
+            api_ms: data.cost.total_api_duration_ms,
+            cc_lines_added: data.cost.total_lines_added,
+            cc_lines_removed: data.cost.total_lines_removed,
+            git: git_status,
+            five_hour_pct,
+            five_hour_resets: five_hour.and_then(|r| r.resets_at),
+            seven_day_pct,
+            seven_day_resets: seven_day.and_then(|r| r.resets_at),
+        });
+    }
 }
 
 #[cfg(test)]

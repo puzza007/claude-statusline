@@ -53,6 +53,22 @@ and continue with the cached values, so the render path never touches the networ
 never refreshed here since Claude Code owns and rotates them. `--no-usage` disables the feature; the
 lookup is also skipped when the input has no `rate_limits` (API-key users have no such buckets).
 
+History (`src/history.rs`): every render is recorded to an SQLite database at
+`$XDG_DATA_HOME/claude-statusline/history.db` (default `~/.local/share/...`) via `rusqlite` with the
+`bundled` feature (statically linked, like libgit2). Three tables: `samples` (one row per observed
+state change per session, plus a heartbeat row every 5 idle minutes), `sessions` (first/last seen,
+cwd, worktree, Claude Code version, and the fingerprint of the last sample used for change
+detection) and `usage_limits` (one row per model per successful usage API fetch, written by the
+`--refresh-usage` child). Change detection is a hash of every sample field except timestamps, stored
+in `sessions.last_fp`, so the thousands of identical renders per turn collapse into one row. Recording
+runs after the line is printed, uses WAL + a 50 ms busy timeout so concurrent sessions can share the
+file, and swallows every error so the render is never broken. Schema changes are appended to `MIGRATIONS`; each step is
+applied in its own transaction together with the `PRAGMA user_version` bump so an interrupted step
+is retried whole. `GitStatus` (in `main.rs`, including the uncommitted diff line counts) is hashed
+into the fingerprint; `Sample::fingerprint` destructures every field so adding one is a compile
+error until it is placed in or explicitly outside the hash. `samples.cwd` is
+recorded per row (not just the latest on `sessions`) so a branch is always attributable to a repo. `--no-history` disables recording and is forwarded to the refresh child.
+
 Git status symbols (starship-style):
 - `+N` — staged files
 - `!N` — modified files
@@ -67,6 +83,7 @@ Lines changed (`+<added> -<removed>`): total insertions and deletions in uncommi
 ### Dependencies
 
 - `serde` / `serde_json` — JSON deserialization
+- `rusqlite` (bundled) — the history database; SQLite is built from source and statically linked
 - `git2` — git status via libgit2 (no subprocess spawning). Uses `vendored-libgit2` so libgit2 is
   built from source and statically linked, rather than picking up a system copy whose path breaks
   when the package manager upgrades it.
