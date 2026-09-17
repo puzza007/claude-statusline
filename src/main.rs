@@ -4,6 +4,7 @@ use colored::Colorize;
 use git2::{Repository, Status, StatusOptions};
 use serde::Deserialize;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 mod usage;
 
@@ -72,6 +73,20 @@ struct RateLimit {
     resets_at: Option<i64>,
 }
 
+/// Unix epoch seconds.
+pub(crate) fn now_secs() -> i64 {
+    Local::now().timestamp()
+}
+
+/// `$VAR/claude-statusline`, or `$HOME/<fallback>/claude-statusline` when the XDG
+/// variable is unset.
+pub(crate) fn xdg_dir(var: &str, fallback: &str) -> Option<PathBuf> {
+    let base = std::env::var_os(var)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(fallback)))?;
+    Some(base.join("claude-statusline"))
+}
+
 fn shorten_home(path: &str) -> String {
     if let Some(home) = std::env::var_os("HOME") {
         let home = home.to_string_lossy();
@@ -101,17 +116,28 @@ const WT_MODIFIED: Status = Status::from_bits_truncate(
     Status::WT_MODIFIED.bits() | Status::WT_RENAMED.bits() | Status::WT_TYPECHANGE.bits(),
 );
 
-fn git_part(dir: &str) -> String {
-    let mut repo = match Repository::discover(dir) {
-        Ok(r) => r,
-        Err(_) => return String::new(),
-    };
+/// Git state of the working tree as the statusline counts it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) struct GitStatus {
+    pub branch: String,
+    pub staged: u32,
+    pub modified: u32,
+    pub deleted: u32,
+    pub untracked: u32,
+    pub conflicted: u32,
+    pub stashes: u32,
+    pub ahead: u32,
+    pub behind: u32,
+    /// Insertions and deletions in uncommitted changes (staged + unstaged) vs HEAD.
+    pub diff_added: u32,
+    pub diff_removed: u32,
+}
+
+fn git_status(dir: &str) -> Option<GitStatus> {
+    let mut repo = Repository::discover(dir).ok()?;
 
     let (is_branch, branch) = {
-        let head = match repo.head() {
-            Ok(h) => h,
-            Err(_) => return String::new(),
-        };
+        let head = repo.head().ok()?;
         let is_branch = head.is_branch();
         let branch = if is_branch {
             head.shorthand().unwrap_or("").to_string()
@@ -124,83 +150,96 @@ fn git_part(dir: &str) -> String {
     };
 
     if branch.is_empty() {
-        return String::new();
+        return None;
     }
 
-    let mut flags = String::new();
+    let mut status = GitStatus {
+        branch,
+        ..Default::default()
+    };
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).exclude_submodules(true);
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        let mut staged = 0u32;
-        let mut modified = 0u32;
-        let mut deleted = 0u32;
-        let mut untracked = 0u32;
-        let mut conflicted = 0u32;
-
         for entry in statuses.iter() {
             let s = entry.status();
             if s.contains(Status::CONFLICTED) {
-                conflicted += 1;
+                status.conflicted += 1;
             }
             if s.intersects(STAGED) {
-                staged += 1;
+                status.staged += 1;
             }
             if s.intersects(WT_MODIFIED) {
-                modified += 1;
+                status.modified += 1;
             }
             if s.intersects(Status::WT_DELETED) || s.intersects(Status::INDEX_DELETED) {
-                deleted += 1;
+                status.deleted += 1;
             }
             if s.contains(Status::WT_NEW) {
-                untracked += 1;
+                status.untracked += 1;
             }
-        }
-        if conflicted > 0 {
-            write!(flags, " {}", format!("={conflicted}").red()).ok();
-        }
-        if staged > 0 {
-            write!(flags, " {}", format!("+{staged}").green()).ok();
-        }
-        if modified > 0 {
-            write!(flags, " {}", format!("!{modified}").yellow()).ok();
-        }
-        if deleted > 0 {
-            write!(flags, " {}", format!("✘{deleted}").red()).ok();
-        }
-        if untracked > 0 {
-            write!(flags, " {}", format!("?{untracked}").blue()).ok();
         }
     }
 
-    if let Ok(stashes) = stash_count(&mut repo)
-        && stashes > 0
-    {
-        write!(flags, " {}", format!("${stashes}").cyan()).ok();
+    status.stashes = stash_count(&mut repo).unwrap_or(0);
+
+    if let Some((added, removed)) = diff_lines(&repo) {
+        status.diff_added = added as u32;
+        status.diff_removed = removed as u32;
     }
 
     if is_branch {
-        let upstream_ref = format!("refs/heads/{branch}");
+        let upstream_ref = format!("refs/heads/{}", status.branch);
         if let Ok(local_oid) = repo.refname_to_id("HEAD")
             && let Ok(upstream_name) = repo.branch_upstream_name(&upstream_ref)
             && let Some(name) = upstream_name.as_str()
             && let Ok(upstream_oid) = repo.refname_to_id(name)
             && let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid)
         {
-            if ahead > 0 {
-                write!(flags, " {}", format!("⇡{ahead}").green()).ok();
-            }
-            if behind > 0 {
-                write!(flags, " {}", format!("⇣{behind}").red()).ok();
-            }
+            status.ahead = ahead as u32;
+            status.behind = behind as u32;
         }
     }
 
-    format!(" {} {}{}", "\u{2387}".dimmed(), branch.magenta(), flags,)
+    Some(status)
+}
+
+fn render_git(status: &GitStatus) -> String {
+    let mut flags = String::new();
+    if status.conflicted > 0 {
+        write!(flags, " {}", format!("={}", status.conflicted).red()).ok();
+    }
+    if status.staged > 0 {
+        write!(flags, " {}", format!("+{}", status.staged).green()).ok();
+    }
+    if status.modified > 0 {
+        write!(flags, " {}", format!("!{}", status.modified).yellow()).ok();
+    }
+    if status.deleted > 0 {
+        write!(flags, " {}", format!("✘{}", status.deleted).red()).ok();
+    }
+    if status.untracked > 0 {
+        write!(flags, " {}", format!("?{}", status.untracked).blue()).ok();
+    }
+    if status.stashes > 0 {
+        write!(flags, " {}", format!("${}", status.stashes).cyan()).ok();
+    }
+    if status.ahead > 0 {
+        write!(flags, " {}", format!("⇡{}", status.ahead).green()).ok();
+    }
+    if status.behind > 0 {
+        write!(flags, " {}", format!("⇣{}", status.behind).red()).ok();
+    }
+    format!(
+        " {} {}{}",
+        "\u{2387}".dimmed(),
+        status.branch.magenta(),
+        flags
+    )
 }
 
 fn stash_count(repo: &mut Repository) -> Result<u32, git2::Error> {
-    let mut count = 0u32;
+    let mut count = 0;
     repo.stash_foreach(|_, _, _| {
         count += 1;
         true
@@ -209,8 +248,7 @@ fn stash_count(repo: &mut Repository) -> Result<u32, git2::Error> {
 }
 
 /// Returns (insertions, deletions) for uncommitted changes (staged + unstaged) vs HEAD.
-fn git_lines(dir: &str) -> Option<(usize, usize)> {
-    let repo = Repository::discover(dir).ok()?;
+fn diff_lines(repo: &Repository) -> Option<(usize, usize)> {
     let head = repo.head().ok()?.peel_to_tree().ok()?;
     let diff = repo
         .diff_tree_to_workdir_with_index(Some(&head), None)
@@ -279,7 +317,8 @@ fn main() {
         ),
         None => (shorten_home(&data.workspace.current_dir), String::new()),
     };
-    let git = git_part(&data.workspace.current_dir);
+    let git_status = git_status(&data.workspace.current_dir);
+    let git = git_status.as_ref().map(render_git).unwrap_or_default();
 
     let ctx = data
         .context_window
@@ -320,7 +359,7 @@ fn main() {
         String::new()
     };
 
-    let lines = match git_lines(&data.workspace.current_dir) {
+    let lines = match git_status.as_ref().map(|g| (g.diff_added, g.diff_removed)) {
         Some((added, removed)) if added > 0 || removed > 0 => format!(
             " {} {}",
             format!("+{added}").green(),
@@ -383,6 +422,10 @@ mod tests {
 
     fn force_colors() {
         colored::control::set_override(true);
+    }
+
+    fn git_part(dir: &str) -> String {
+        git_status(dir).as_ref().map(render_git).unwrap_or_default()
     }
 
     fn init_test_repo() -> (TempDir, Repository, Oid) {

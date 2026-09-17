@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+use crate::{now_secs, xdg_dir};
 
 /// How long a cached response is considered fresh.
 pub const TTL: Duration = Duration::from_secs(5 * 60);
@@ -35,23 +37,13 @@ pub struct ScopedLimit {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Cache {
     /// Unix epoch seconds of the last fetch attempt, successful or not.
-    fetched_at: u64,
+    fetched_at: i64,
     #[serde(default)]
     limits: Vec<ScopedLimit>,
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn cache_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(base.join("claude-statusline"))
+    xdg_dir("XDG_CACHE_HOME", ".cache")
 }
 
 fn read_cache(path: &Path) -> Option<Cache> {
@@ -68,12 +60,13 @@ fn write_cache(path: &Path, cache: &Cache) -> std::io::Result<()> {
     fs::rename(tmp, path)
 }
 
-fn is_fresh(cache: &Cache, now: u64) -> bool {
-    now.saturating_sub(cache.fetched_at) < TTL.as_secs()
+fn is_fresh(cache: &Cache, now: i64) -> bool {
+    now - cache.fetched_at < TTL.as_secs() as i64
 }
 
 /// Returns the cached per-model limits, kicking off a background refresh when the
 /// cache is missing or older than [`TTL`]. Never blocks on the network.
+///
 pub fn scoped_limits() -> Vec<ScopedLimit> {
     let Some(dir) = cache_dir() else {
         return Vec::new();
@@ -255,7 +248,7 @@ struct OAuth {
 /// that token and rotates it itself.
 fn access_token() -> Option<String> {
     let raw = read_credentials()?;
-    token_from_credentials(&raw, now_secs() as i64 * 1000)
+    token_from_credentials(&raw, now_secs() * 1000)
 }
 
 fn token_from_credentials(raw: &str, now_ms: i64) -> Option<String> {
@@ -355,8 +348,8 @@ mod tests {
             fetched_at: 1000,
             limits: vec![],
         };
-        assert!(is_fresh(&cache, 1000 + TTL.as_secs() - 1));
-        assert!(!is_fresh(&cache, 1000 + TTL.as_secs()));
+        assert!(is_fresh(&cache, 1000 + TTL.as_secs() as i64 - 1));
+        assert!(!is_fresh(&cache, 1000 + TTL.as_secs() as i64));
         assert!(!is_fresh(&Cache::default(), 1000));
     }
 
