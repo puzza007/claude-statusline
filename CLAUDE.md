@@ -87,6 +87,9 @@ workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data d
 files. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
 categorical slots and the rest are muted "other", tables only.
 
+`--report-url <url>` appends `↗` wrapped in an OSC 8 hyperlink (`ESC ] 8 ; ; url ST … ESC ] 8 ; ; ST`)
+so the report is one click away in terminals that support it.
+
 Git status symbols (starship-style):
 - `+N` — staged files
 - `!N` — modified files

@@ -110,6 +110,9 @@ database. Without Docker:
 cargo run -p claude-statusline-report      # DB_PATH and PORT override the defaults
 ```
 
+Pass `--report-url http://localhost:8787` in the statusline command to end the line with a `↗`
+that links to the report (an OSC 8 hyperlink; terminals without support show the arrow alone).
+
 ## License
 
 MIT

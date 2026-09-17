@@ -32,10 +32,21 @@ struct Cli {
     #[arg(long)]
     no_history: bool,
 
+    /// Append a clickable link to the history report (e.g. http://localhost:8787),
+    /// as an OSC 8 terminal hyperlink.
+    #[arg(long)]
+    report_url: Option<String>,
+
     /// Refresh the cached usage API response and exit. Spawned in the background
     /// by the statusline itself; not meant to be run by hand.
     #[arg(long, hide = true)]
     refresh_usage: bool,
+}
+
+/// Wraps `text` in an OSC 8 hyperlink to `url`. Terminals without support show
+/// the text alone.
+fn hyperlink(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
 }
 
 #[derive(Deserialize)]
@@ -430,11 +441,17 @@ fn main() {
         .split_once(" (")
         .map(|(name, _)| name)
         .unwrap_or(&data.model.display_name);
+    let report = cli
+        .report_url
+        .as_deref()
+        .map(|url| format!(" {}", hyperlink(url, &"\u{2197}".dimmed().to_string())))
+        .unwrap_or_default();
+
     let dir_fmt = dir.bold().blue();
     let sep = "|".dimmed();
     let model_fmt = model.cyan();
     println!(
-        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{cost}"
+        "{dir_fmt}{worktree}{git}{lines} {sep} {model_fmt}{ctx}{rate}{rate_5h_time}{weekly}{week}{scoped}{cost}{report}"
     );
 
     // Record after printing so the render is never held up by the database.
@@ -492,6 +509,14 @@ mod tests {
                 .unwrap()
         };
         (tmp, repo, oid)
+    }
+
+    #[test]
+    fn hyperlink_wraps_text_in_osc8() {
+        assert_eq!(
+            hyperlink("http://x", "go"),
+            "\x1b]8;;http://x\x1b\\go\x1b]8;;\x1b\\"
+        );
     }
 
     #[test]
