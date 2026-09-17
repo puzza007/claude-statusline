@@ -1,0 +1,13 @@
+services:
+  report:
+    build:
+      context: .
+      dockerfile: report/Dockerfile
+    image: claude-statusline-report
+    ports:
+      - "${REPORT_PORT:-8787}:8080"
+    volumes:
+      # The statusline's history database. Mounted as a directory (not the file)
+      # so SQLite can see the -wal/-shm files that WAL mode keeps beside it.
+      - ${CLAUDE_STATUSLINE_DATA:-~/.local/share/claude-statusline}:/data
+    restart: unless-stopped

@@ -12,7 +12,11 @@ cargo build --release
 cargo install --path .
 
 # Lint and format
-cargo clippy && cargo fmt
+cargo clippy --workspace && cargo fmt
+
+# Report service
+docker compose up -d --build   # http://localhost:8787
+cargo run -p claude-statusline-report
 ```
 
 ## Architecture
@@ -68,6 +72,20 @@ is retried whole. `GitStatus` (in `main.rs`, including the uncommitted diff line
 into the fingerprint; `Sample::fingerprint` destructures every field so adding one is a compile
 error until it is placed in or explicitly outside the hash. `samples.cwd` is
 recorded per row (not just the latest on `sessions`) so a branch is always attributable to a repo. `--no-history` disables recording and is forwarded to the refresh child.
+
+Report (`report/`, workspace member `claude-statusline-report`): an axum service that serves the
+history as a chart page. `report/template.html` is the page; it has no document skeleton because
+the same file is published as a Claude artifact (which wraps it) and the server adds its own
+`<!doctype>`/`<head>`/`<body>`. The server replaces the single `__DATA__` token with JSON from three
+queries (`samples`, `usage_limits`, `sessions`, aliases as the template expects) and escapes every `<` in
+the JSON as `\u003c` so no value can end the script block. The database is opened `SQLITE_OPEN_READ_ONLY` per
+request with a 500 ms busy timeout; `?days=N` (default 30, `all`) bounds the rows so the page does
+not grow without limit. `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
+is static) into a `scratch` image (a stub `src/main.rs` stands in for the statusline package so the
+workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data directory at
+`/data`, which must be the directory rather than the file so SQLite can use the `-wal`/`-shm`
+files. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
+categorical slots and the rest are muted "other", tables only.
 
 Git status symbols (starship-style):
 - `+N` — staged files

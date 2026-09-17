@@ -89,6 +89,27 @@ sqlite3 ~/.local/share/claude-statusline/history.db \
 duckdb -c "ATTACH '$HOME/.local/share/claude-statusline/history.db' AS h (TYPE sqlite); COPY h.samples TO 'samples.parquet'"
 ```
 
+### Report
+
+`report/` is a small HTTP service that renders the history as a page of charts (context growth
+per session, spend and cost per turn, rate-limit usage and weekly pace, git diff churn, output
+tokens per turn, an activity heatmap, and tables of sessions and samples).
+
+```bash
+docker compose up -d          # http://localhost:8787
+REPORT_PORT=9000 docker compose up -d
+```
+
+The container is a 6 MB static binary on `scratch`; it mounts `~/.local/share/claude-statusline`
+read-only-in-spirit (SQLite needs the directory writable for its WAL side files) and opens the
+database read-only on every request, so the page is always current. Both `/` and `/data.json` show the
+last 30 days by default; `?days=7` or `?days=all` changes the window. `GET /healthz` checks the
+database. Without Docker:
+
+```bash
+cargo run -p claude-statusline-report      # DB_PATH and PORT override the defaults
+```
+
 ## License
 
 MIT
