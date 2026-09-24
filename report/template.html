@@ -133,7 +133,7 @@ footer{color:var(--muted);font-size:12px;max-width:65ch}
 <script>
 const D=__DATA__;
 const SLOTS=["var(--s1)","var(--s2)","var(--s3)","var(--s4)","var(--s5)","var(--s6)"];
-const modelName=id=>({"claude-fable-5-1":"Fable 5.1","claude-opus-5":"Opus 5","claude-sonnet-5":"Sonnet 5","claude-haiku-4-5-20251001":"Haiku 4.5"})[id]??id;
+const modelName=r=>r?.model?.split(" (")[0]??r?.model_id;
 const fmtT=ts=>new Date(ts*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
 const fmtD=ts=>new Date(ts*1000).toLocaleDateString([], {weekday:"short"})+" "+fmtT(ts);
 let fmtX=fmtT;
@@ -152,7 +152,7 @@ const ranked=[...D.sessions].sort((a,b)=>spent(bySid[b.sid])-spent(bySid[a.sid])
 // Name a session by the cwd it spent most samples in, so a cd into a subdirectory
 // late in the session does not rename it.
 const homeDir=rows=>{const n=new Map();for(const r of rows)if(r.cwd)n.set(r.cwd,(n.get(r.cwd)??0)+1);return [...n].sort((a,b)=>b[1]-a[1])[0]?.[0];};
-ranked.forEach((s,i)=>{SESS[s.sid]={name:(homeDir(bySid[s.sid])??s.cwd).split("/").pop(),model:modelName(bySid[s.sid].at(-1)?.model_id),color:i<SLOTS.length&&spent(bySid[s.sid])>0?SLOTS[i]:"var(--muted)",major:i<SLOTS.length&&spent(bySid[s.sid])>0};});
+ranked.forEach((s,i)=>{SESS[s.sid]={name:(homeDir(bySid[s.sid])??s.cwd).split("/").pop(),model:modelName(bySid[s.sid].at(-1)),color:i<SLOTS.length&&spent(bySid[s.sid])>0?SLOTS[i]:"var(--muted)",major:i<SLOTS.length&&spent(bySid[s.sid])>0};});
 const MAJOR=ranked.filter(s=>SESS[s.sid].major);
 const minor=D.sessions.length-MAJOR.length;
 const t0=Math.min(...D.samples.map(r=>r.ts)),t1=Math.max(...D.samples.map(r=>r.ts),...D.limits.map(r=>r.ts));
