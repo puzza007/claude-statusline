@@ -54,7 +54,10 @@ header .path{color:var(--muted);font-size:12px;margin-top:8px}
 @media (max-width:760px){.two{grid-template-columns:1fr}}
 .tablewrap{overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-size:13px}
-th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--grid);white-space:nowrap}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--grid);white-space:nowrap}
+td.flow{white-space:normal;min-width:34ch;max-width:42ch;overflow-wrap:break-word}
+td .dirs{white-space:normal;max-width:34ch}
+td .more{color:var(--muted);font-size:12px}
 th{color:var(--ink-2);font-weight:500;font-size:12px}
 th.num,td.num{text-align:right}
 tr:last-child td{border-bottom:0}
@@ -314,11 +317,18 @@ heatmap($("#c9"),grid,{legendEl:$("#lg9")});
 
 // ---- tables ----------------------------------------------------------------
 const branches=rows=>rows.map(r=>r.branch).filter((b,i,a)=>b&&b!==a[i-1]);
+// The table lists each named branch once in first-seen order; detached HEADs (short
+// SHAs, mostly mid-rebase) only count as switches. The full sequence is in the title.
+const SHA=/^[0-9a-f]{7,40}$/;
+const branchCell=rows=>{const seq=branches(rows),named=[...new Set(seq.filter(b=>!SHA.test(b)))],shown=named.slice(0,4);
+  return `<td class="mono flow" title="${seq.join(" → ")}">${shown.join("<br>")}${seq.length>1?`<div class="more">${named.length>shown.length?`+${named.length-shown.length} more · `:""}${seq.length-1} switch${seq.length>2?"es":""}</div>`:""}</td>`;};
 // Fold subdirectories of the session's home directory into it: a cd into one is not another repo.
 const repos=rows=>{const h=homeDir(rows);return [...new Set(rows.map(r=>r.cwd).filter(Boolean).map(d=>d.startsWith(h+"/")?h:d))].map(tilde);};
+// Under the session name, only when it says more than ~/src/<name>.
+const dirsLine=(rows,name)=>{const ds=repos(rows);return ds.length===1&&ds[0]==="~/src/"+name?"":`<div class="mono more dirs">${ds.join(", ")}</div>`;};
 const th=cols=>"<tr>"+cols.map(([c,n])=>`<th class="${n?'num':''}">${c}</th>`).join("")+"</tr>";
-$("#sessions").innerHTML=th([["Session"],["Model"],["Directories"],["Branches"],["First seen"],["Last seen"],["Samples",1],["Turns",1],["Context",1],["Session cost",1],["Spent here",1]])+
-  ranked.map(s=>{const rows=bySid[s.sid],i=SESS[s.sid];return `<tr><td><span class="sw" style="background:${i.color}"></span>${i.name}</td><td>${i.model}</td><td class="mono">${repos(rows).join(", ")||"—"}</td><td class="mono">⎇ ${branches(rows).join(" → ")}</td><td class="mono">${fmtX(s.first_seen)}</td><td class="mono">${fmtX(s.last_seen)}</td><td class="num">${rows.length}</td><td class="num">${turns.filter(t=>t.sid===s.sid).length}</td><td class="num">${rows[0].ctx_pct}% → ${rows.at(-1).ctx_pct}%</td><td class="num">$${rows.at(-1).cost_usd.toFixed(2)}</td><td class="num">$${(rows.at(-1).cost_usd-rows[0].cost_usd).toFixed(2)}</td></tr>`;}).join("");
+$("#sessions").innerHTML=th([["Session"],["Model"],["Branches"],["Active"],["Samples",1],["Turns",1],["Context",1],["Session cost",1],["Spent here",1]])+
+  ranked.map(s=>{const rows=bySid[s.sid],i=SESS[s.sid];return `<tr><td><span class="sw" style="background:${i.color}"></span>${i.name}${dirsLine(rows,i.name)}</td><td>${i.model}</td>${branchCell(rows)}<td class="mono">${fmtX(s.first_seen)} →<br>${fmtX(s.last_seen)}</td><td class="num">${rows.length}</td><td class="num">${turns.filter(t=>t.sid===s.sid).length}</td><td class="num">${rows.find(r=>r.ctx_pct!=null)?.ctx_pct??0}% → ${rows.findLast(r=>r.ctx_pct!=null)?.ctx_pct??0}%</td><td class="num">$${rows.at(-1).cost_usd.toFixed(2)}</td><td class="num">$${(rows.at(-1).cost_usd-rows[0].cost_usd).toFixed(2)}</td></tr>`;}).join("");
 $("#samples").innerHTML=th([["Time"],["Session"],["cwd"],["Model"],["ctx",1],["Input",1],["Output",1],["Cost",1],["Diff",1],["Branch"],["5h",1],["7d",1]])+
   D.samples.map(r=>`<tr><td class="mono">${fmtT(r.ts)}</td><td>${SESS[r.sid].name}</td><td class="mono">${tilde(r.cwd)}</td><td class="mono">${r.model_id}</td><td class="num">${r.ctx_pct}%</td><td class="num">${r.input_tokens.toLocaleString()}</td><td class="num">${r.output_tokens.toLocaleString()}</td><td class="num">$${r.cost_usd.toFixed(2)}</td><td class="num">+${r.da??0} −${r.dr??0}</td><td class="mono">${r.branch}</td><td class="num">${r.h5}%</td><td class="num">${r.d7}%</td></tr>`).join("");
 </script>
