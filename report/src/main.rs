@@ -5,7 +5,8 @@
 //! `GET /data.json` returns just the JSON and `GET /healthz` checks the database
 //! opens. The database is opened read-only per request, so the page always
 //! reflects what the statusline has recorded. Both `/` and `/data.json` take
-//! `?days=N` (default 30, `all` for everything) to bound the samples returned.
+//! `?days=N` (default 30, `all` for everything) to bound the samples returned, and
+//! `?bucket=N` (seconds, default 60, `0` for raw) to downsample them.
 
 use axum::{
     Router,
@@ -29,12 +30,26 @@ const HEAD: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8
 const FOOT: &str = "</body></html>";
 
 const DEFAULT_DAYS: f64 = 30.0;
+const DEFAULT_BUCKET: i64 = 60;
 
-const SAMPLES: &str =
-    "SELECT ts, substr(session_id,1,8) sid, cwd, model_id, model, ctx_pct, input_tokens,
-    output_tokens, cost_usd, duration_ms, api_ms, cc_lines_added cca, cc_lines_removed ccr,
-    diff_added da, diff_removed dr, branch, five_hour_pct h5, five_hour_resets h5r,
-    seven_day_pct d7, seven_day_resets d7r FROM samples WHERE ts >= ?1 ORDER BY ts";
+/// Keeps the last sample of each session per `?2`-second bucket, plus the samples the
+/// page derives events from: each session's first (spend is measured from it), any
+/// followed by a compaction (input tokens falling below 70%, so the peak can be
+/// marked) and any branch change. Cumulative columns (cost, tokens, lines) stay exact
+/// at the kept points; only intermediate steps are dropped.
+const SAMPLES: &str = "SELECT ts, substr(session_id,1,8) sid, cwd, model_id, model, ctx_pct,
+    input_tokens, output_tokens, cost_usd, duration_ms, api_ms, cc_lines_added cca,
+    cc_lines_removed ccr, diff_added da, diff_removed dr, branch, five_hour_pct h5,
+    five_hour_resets h5r, seven_day_pct d7, seven_day_resets d7r
+    FROM (SELECT *,
+        row_number() OVER (PARTITION BY session_id, ts / ?2 ORDER BY ts DESC, rowid DESC) rn,
+        row_number() OVER w seq,
+        lead(input_tokens) OVER w next_in,
+        lag(branch) OVER w prev_branch
+        FROM samples WHERE ts >= ?1
+        WINDOW w AS (PARTITION BY session_id ORDER BY ts, rowid))
+    WHERE rn = 1 OR seq = 1 OR next_in < input_tokens * 0.7 OR branch IS NOT prev_branch
+    ORDER BY ts";
 const LIMITS: &str =
     "SELECT ts, model, used_pct, resets_at FROM usage_limits WHERE ts >= ?1 ORDER BY ts";
 const SESSIONS: &str = "SELECT substr(session_id,1,8) sid, first_seen, last_seen, cwd, cc_version
@@ -50,11 +65,11 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 /// Runs `sql` and returns its rows as JSON objects keyed by column name.
-fn query(conn: &Connection, sql: &str, since: i64) -> rusqlite::Result<Value> {
+fn query(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> rusqlite::Result<Value> {
     let mut stmt = conn.prepare(sql)?;
     let names: Vec<String> = stmt.column_names().iter().map(|n| n.to_string()).collect();
     let rows = stmt
-        .query_map([since], |row| {
+        .query_map(params, |row| {
             let mut obj = Map::with_capacity(names.len());
             for (i, name) in names.iter().enumerate() {
                 let v = match row.get_ref(i)? {
@@ -71,11 +86,11 @@ fn query(conn: &Connection, sql: &str, since: i64) -> rusqlite::Result<Value> {
     Ok(Value::Array(rows))
 }
 
-fn load(conn: &Connection, since: i64) -> rusqlite::Result<Value> {
+fn load(conn: &Connection, since: i64, bucket: i64) -> rusqlite::Result<Value> {
     Ok(json!({
-        "samples": query(conn, SAMPLES, since)?,
-        "limits": query(conn, LIMITS, since)?,
-        "sessions": query(conn, SESSIONS, since)?,
+        "samples": query(conn, SAMPLES, [since, bucket])?,
+        "limits": query(conn, LIMITS, [since])?,
+        "sessions": query(conn, SESSIONS, [since])?,
     }))
 }
 
@@ -116,12 +131,21 @@ fn since(params: &HashMap<String, String>) -> i64 {
     (now - days * 86_400.0) as i64
 }
 
+/// Downsampling bucket in seconds from `?bucket=`; `0` is treated as 1 s, effectively raw.
+fn bucket(params: &HashMap<String, String>) -> i64 {
+    params
+        .get("bucket")
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(DEFAULT_BUCKET)
+        .max(1)
+}
+
 async fn index(
     State(db): State<PathBuf>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, Response> {
-    let s = since(&params);
-    let v = with_db(db, move |c| load(c, s)).await?;
+    let (s, b) = (since(&params), bucket(&params));
+    let v = with_db(db, move |c| load(c, s, b)).await?;
     // No `<` may appear in inline JSON or a value could end the script block;
     // `<` is the same string once parsed.
     let page = TEMPLATE.replacen("__DATA__", &v.to_string().replace('<', "\\u003c"), 1);
@@ -132,8 +156,8 @@ async fn data_json(
     State(db): State<PathBuf>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, Response> {
-    let s = since(&params);
-    let v = with_db(db, move |c| load(c, s)).await?;
+    let (s, b) = (since(&params), bucket(&params));
+    let v = with_db(db, move |c| load(c, s, b)).await?;
     Ok(([(header::CONTENT_TYPE, "application/json")], v.to_string()))
 }
 
