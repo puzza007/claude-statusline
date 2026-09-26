@@ -80,7 +80,10 @@ the same file is published as a Claude artifact (which wraps it) and the server 
 queries (`samples`, `usage_limits`, `sessions`, aliases as the template expects) and escapes every `<` in
 the JSON as `\u003c` so no value can end the script block. The database is opened `SQLITE_OPEN_READ_ONLY` per
 request with a 500 ms busy timeout; `?days=N` (default 30, `all`) bounds the rows so the page does
-not grow without limit. `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
+not grow without limit; `?bucket=N` (seconds, default 60, `0` for effectively raw) keeps
+only the last sample per session per bucket, plus each session's first sample, compaction peaks and
+branch changes, so the page's spend, compaction and branch-switch numbers match the raw data at
+about a quarter of the size. Idle bands can be up to one bucket longer. `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
 is static) into a `scratch` image (a stub `src/main.rs` stands in for the statusline package so the
 workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data directory at
 `/data`, which must be the directory rather than the file so SQLite can use the `-wal`/`-shm`
