@@ -19,10 +19,11 @@ h2{font-size:13px;font-weight:500;margin:0;color:var(--ink-2);text-transform:upp
 .sub{color:var(--ink-2);margin:4px 0 0;max-width:65ch}
 .mono,.kpi b,td.num,th.num,.axis,.legend code,.tip{font-family:"IBM Plex Mono","SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
 header .path{color:var(--muted);font-size:12px;margin-top:8px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
 .kpi{background:var(--surface);border:1px solid var(--ring);border-radius:6px;padding:12px 14px;display:grid;gap:2px}
 .kpi span{font-size:12px;color:var(--ink-2)}
 .kpi b{font-size:26px;font-weight:500;line-height:1.15}
+.kpi b span{font-size:18px;color:var(--muted)}
 .kpi small{font-size:12px;color:var(--muted)}
 .kpi small.up{color:var(--good)}
 .panel{background:var(--surface);border:1px solid var(--ring);border-radius:6px;padding:16px 18px 12px;display:grid;gap:10px;min-width:0}
@@ -139,6 +140,7 @@ const SLOTS=["var(--s1)","var(--s2)","var(--s3)","var(--s4)","var(--s5)","var(--
 const modelName=r=>r?.model?.split(" (")[0]??r?.model_id;
 const fmtT=ts=>new Date(ts*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
 const fmtD=ts=>new Date(ts*1000).toLocaleDateString([], {weekday:"short"})+" "+fmtT(ts);
+const fmtW=ts=>new Date(ts*1000).toLocaleString([], {weekday:"short",hour:"2-digit",minute:"2-digit"});
 let fmtX=fmtT;
 const fmtK=n=>n>=1000?(n/1000).toFixed(n>=10000?0:1)+"k":String(Math.round(n));
 const tilde=p=>p?p.replace(/^\/Users\/[^/]+/,"~"):"—";
@@ -174,6 +176,12 @@ const spend=Object.values(bySid).reduce((a,rows)=>a+rows.at(-1).cost_usd-rows[0]
 const fable=D.limits.at(-1);
 const fableSeries=D.limits.filter(r=>r.model===fable.model);
 const elapsedPct=r=>Math.max(0,Math.min(100,(r.ts-(r.resets_at-WEEK))/WEEK*100));
+// Usage only rises within a window and a session waking from idle reports the window
+// it last saw, so the current 7-day figure is the max over samples of the latest window.
+const d7r=Math.max(0,...D.samples.map(r=>r.d7r??0));
+const week=D.samples.filter(r=>r.d7r===d7r);
+const weekUsed=Math.max(...week.map(r=>r.d7));
+const weekElapsed=week.length&&elapsedPct({ts:week.at(-1).ts,resets_at:d7r}),weekPace=weekUsed-weekElapsed;
 
 // ---- header + KPIs ---------------------------------------------------------
 const mins=Math.round((t1-t0)/60);
@@ -181,11 +189,12 @@ $("#sub").innerHTML=`${mins<120?mins+" minutes":(mins/60).toFixed(1)+" hours"} o
 $("#range").textContent=new Date(t0*1000).toLocaleDateString([], {weekday:"short",day:"numeric",month:"short"})+"  "+fmtT(t0)+" → "+fmtX(t1)+"  ·  "+D.samples.length+" samples  ·  "+D.limits.length+" limit fetches";
 const activeMins=Math.round((t1-t0-idleSecs)/60);
 const kp=[["Sessions",String(D.sessions.length),(minor?minor+" with no spend · ":"")+"Claude Code "+[...new Set(D.sessions.map(s=>s.cc_version))].join(", ")],
- ["Spend in window","$"+spend.toFixed(2),turns.length+" paid turns"],
+ ["Spend in window","$"+spend.toFixed(spend>=100?0:2),turns.length+" paid turns"],
  ["Active time",activeMins>=120?(activeMins/60).toFixed(1)+"h":activeMins+"m","of "+(mins>=120?(mins/60).toFixed(1)+"h":mins+"m")+" · "+idle.length+" idle gaps"],
  ["Compactions",String(compactions.length),compactions.length?"largest "+fmtK(Math.max(...compactions.map(c=>c.from-c.to)))+" tokens":"none seen yet"],
  ["Peak context",Math.max(...D.samples.map(r=>r.ctx_pct))+"%","ctx: in the statusline"],
- [fable.model+" weekly",fable.used_pct+"%","resets "+new Date(fable.resets_at*1000).toLocaleString([], {weekday:"short",hour:"2-digit",minute:"2-digit"})]];
+ ...week.length?[["Weekly used",`${weekUsed}%<span>/${weekElapsed.toFixed(0)}%</span>`,`all models<br>used / week gone<br>${weekPace>0?"▲":"▼"} ${Math.abs(weekPace).toFixed(0)} pts ${weekPace>0?"over":"under"} pace<br>resets ${fmtW(d7r)}`]]:[],
+ [fable.model+" weekly",fable.used_pct+"%","resets "+fmtW(fable.resets_at)]];
 $("#kpis").innerHTML=kp.map(([l,v,s])=>`<div class="kpi"><span>${l}</span><b>${v}</b><small>${s}</small></div>`).join("");
 
 // ---- chart primitives ------------------------------------------------------
@@ -303,7 +312,7 @@ lineChart($("#c5"),[
   {name:fable.model+" used",label:"used",color:"var(--s1)",pts:fableSeries.map(r=>({t:r.ts,y:r.used_pct}))},
   {name:"Week elapsed",label:"elapsed",color:"var(--muted)",dash:true,pts:fableSeries.map(r=>({t:r.ts,y:elapsedPct(r)}))},
 ],{yFmt:v=>v+"%",yMax:100,h:300,W:520,step:true,legendEl:$("#pace-legend")});
-$("#pace-note").textContent=`${fable.model} usage against the share of its 7-day window already elapsed (window started ${new Date((fable.resets_at-WEEK)*1000).toLocaleString([], {weekday:"short",hour:"2-digit",minute:"2-digit"})}). Below the dashed line means the budget outlasts the week at this rate.`;
+$("#pace-note").textContent=`${fable.model} usage against the share of its 7-day window already elapsed (window started ${fmtW(fable.resets_at-WEEK)}). Below the dashed line means the budget outlasts the week at this rate.`;
 
 lineChart($("#c6"),sessSeries(r=>(r.da??0)+(r.dr??0)),{yFmt:v=>fmtK(v),h:300,W:520,legendEl:$("#lg6"),tipFmt:p=>`+${p.r.da??0} −${p.r.dr??0} · ⎇ ${p.r.branch}`,gap:GAP,markers:branchSwitches.map(b=>({t:b.t,color:SESS[b.sid].color,tip:`${SESS[b.sid].name} switched to ⎇ ${b.branch}`}))});
 lineChart($("#c7"),sessSeries(r=>r.cca??0),{yFmt:v=>fmtK(v),h:300,W:520,legendEl:$("#lg7"),gap:GAP,tipFmt:p=>`+${p.r.cca??0} −${p.r.ccr??0} lines`});
