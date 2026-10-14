@@ -23,6 +23,7 @@ header .path{color:var(--muted);font-size:12px;margin-top:8px}
 .kpi{background:var(--surface);border:1px solid var(--ring);border-radius:6px;padding:12px 14px;display:grid;gap:2px}
 .kpi span{font-size:12px;color:var(--ink-2)}
 .kpi b{font-size:26px;font-weight:500;line-height:1.15}
+.kpi b span{font-size:18px;color:var(--muted)}
 .kpi small{font-size:12px;color:var(--muted)}
 .kpi small.up{color:var(--good)}
 .panel{background:var(--surface);border:1px solid var(--ring);border-radius:6px;padding:16px 18px 12px;display:grid;gap:10px;min-width:0}
@@ -192,7 +193,7 @@ const kp=[["Sessions",String(D.sessions.length),(minor?minor+" with no spend · 
  ["Active time",activeMins>=120?(activeMins/60).toFixed(1)+"h":activeMins+"m","of "+(mins>=120?(mins/60).toFixed(1)+"h":mins+"m")+" · "+idle.length+" idle gaps"],
  ["Compactions",String(compactions.length),compactions.length?"largest "+fmtK(Math.max(...compactions.map(c=>c.from-c.to)))+" tokens":"none seen yet"],
  ["Peak context",Math.max(...D.samples.map(r=>r.ctx_pct))+"%","ctx: in the statusline"],
- ...week.length?[["Weekly used",weekUsed+"%",`all models<br>${weekElapsed.toFixed(0)}% of week gone<br>${weekPace>0?"▲":"▼"} ${Math.abs(weekPace).toFixed(0)} pts ${weekPace>0?"over":"under"} pace<br>resets ${fmtW(d7r)}`]]:[],
+ ...week.length?[["Weekly used",`${weekUsed}%<span>/${weekElapsed.toFixed(0)}%</span>`,`all models<br>used / week gone<br>${weekPace>0?"▲":"▼"} ${Math.abs(weekPace).toFixed(0)} pts ${weekPace>0?"over":"under"} pace<br>resets ${fmtW(d7r)}`]]:[],
  [fable.model+" weekly",fable.used_pct+"%","resets "+fmtW(fable.resets_at)]];
 $("#kpis").innerHTML=kp.map(([l,v,s])=>`<div class="kpi"><span>${l}</span><b>${v}</b><small>${s}</small></div>`).join("");
 
