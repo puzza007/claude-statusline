@@ -139,7 +139,7 @@ footer{color:var(--muted);font-size:12px;max-width:65ch}
 <section class="panel">
   <div class="panel-head"><h2>Prompt cache hit rate</h2><div class="legend" id="lg12"></div></div>
   <div class="chart" id="c12"></div>
-  <p class="note" id="cache-note">Share of each request's input tokens read from the prompt cache. Drops mark cache writes: a new or compacted context, or a cache that expired while idle.</p>
+  <p class="note" id="cache-note">Share of input tokens read from the prompt cache each hour, across all sessions. Dips are cache writes: new or compacted contexts, or caches that expired while idle.</p>
 </section>
 <section class="panel">
   <h2>Sessions</h2>
@@ -349,8 +349,9 @@ histogram($("#c10"),apiLabels,[{name:"Requests",color:"var(--s1)",counts:apiLabe
 const apiHours=new Map();for(const r of D.api){const h=apiHours.get(r.hour)??{n:0,ms:0};h.n+=r.n;h.ms+=r.ms;apiHours.set(r.hour,h);}
 lineChart($("#c11"),[{name:"Mean per request",label:"mean",color:"var(--s1)",pts:[...apiHours].map(([t,h])=>({t,y:h.ms/h.n/1000,n:h.n}))}],
   {yFmt:v=>v.toFixed(0)+"s",h:300,W:520,legendEl:$("#lg11"),gap:3600,tipFmt:p=>p.y.toFixed(1)+"s · "+p.n+" requests",bands:idle});
-lineChart($("#c12"),MAJOR.map(s=>({name:legendName(s),label:SESS[s.sid].name,color:SESS[s.sid].color,pts:bySid[s.sid].filter(r=>r.cr!=null&&cacheIn(r)).map(r=>({t:r.ts,y:r.cr/cacheIn(r)*100,r}))})).filter(s=>s.pts.length),
-  {yFmt:v=>v+"%",yMax:100,legendEl:$("#lg12"),gap:GAP,bands:idle,tipFmt:p=>`${p.y.toFixed(0)}% · read ${fmtK(p.r.cr)} · wrote ${fmtK(p.r.cw)} · uncached ${fmtK(p.r.ui)}`});
+const cacheHours=new Map();for(const r of cacheRows){const t=Math.floor(r.ts/3600)*3600,h=cacheHours.get(t)??{rd:0,wr:0,un:0};h.rd+=r.cr;h.wr+=r.cw;h.un+=r.ui;cacheHours.set(t,h);}
+lineChart($("#c12"),[{name:"All sessions",label:"hit",color:"var(--s1)",pts:[...cacheHours].filter(([,h])=>h.rd+h.wr+h.un).map(([t,h])=>({t,y:h.rd/(h.rd+h.wr+h.un)*100,h}))}],
+  {yFmt:v=>v+"%",yMax:100,legendEl:$("#lg12"),gap:3600,bands:idle,tipFmt:p=>`${p.y.toFixed(0)}% · read ${fmtK(p.h.rd)} · wrote ${fmtK(p.h.wr)} · uncached ${fmtK(p.h.un)}`});
 if(!cacheRows.length)$("#cache-note").textContent="No cache data yet: it is recorded from this statusline version on.";
 
 const grid=Array.from({length:7},()=>Array(24).fill(0));
