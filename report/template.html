@@ -124,6 +124,23 @@ footer{color:var(--muted);font-size:12px;max-width:65ch}
   <p class="note">Samples recorded per hour of day and weekday. Fills in as the history grows.</p>
 </section>
 </div>
+<div class="two">
+<section class="panel">
+  <div class="panel-head"><h2>API time per request</h2><div class="legend" id="lg10"></div></div>
+  <div class="chart" id="c10"></div>
+  <p class="note">Each step in Claude Code's cumulative <code class="mono">total_api_duration_ms</code> is one request, from send to last token. A step longer than the wall time since the previous one is overlapping requests (parallel subagents) and is left out.</p>
+</section>
+<section class="panel">
+  <div class="panel-head"><h2>API time by hour</h2><div class="legend" id="lg11"></div></div>
+  <div class="chart" id="c11"></div>
+  <p class="note">Mean seconds per request in each hour; hover for the request count.</p>
+</section>
+</div>
+<section class="panel">
+  <div class="panel-head"><h2>Prompt cache hit rate</h2><div class="legend" id="lg12"></div></div>
+  <div class="chart" id="c12"></div>
+  <p class="note" id="cache-note">Share of each request's input tokens read from the prompt cache. Drops mark cache writes: a new or compacted context, or a cache that expired while idle.</p>
+</section>
 <section class="panel">
   <h2>Sessions</h2>
   <div class="tablewrap"><table id="sessions"></table></div>
@@ -132,7 +149,7 @@ footer{color:var(--muted);font-size:12px;max-width:65ch}
   <details><summary>All samples as a table</summary>
   <div class="tablewrap"><table id="samples"></table></div></details>
 </section>
-<footer>Source: <code class="mono">~/.local/share/claude-statusline/history.db</code> — tables <code class="mono">samples</code>, <code class="mono">sessions</code>, <code class="mono">usage_limits</code>. Times shown in your local zone. Rate-limit lines take the max across sessions per 3-minute bucket, because a session waking from idle first reports the values it last saw. Costs are Claude Code's cumulative <code class="mono">total_cost_usd</code>; the spend chart subtracts each session's first observed value.</footer>
+<footer>Source: <code class="mono">~/.local/share/claude-statusline/history.db</code> — tables <code class="mono">samples</code> (including the last request's cache split in <code class="mono">uncached_in</code>, <code class="mono">cache_write</code>, <code class="mono">cache_read</code>), <code class="mono">sessions</code>, <code class="mono">usage_limits</code>. Times shown in your local zone. Rate-limit lines take the max across sessions per 3-minute bucket, because a session waking from idle first reports the values it last saw. Costs are Claude Code's cumulative <code class="mono">total_cost_usd</code>; the spend chart subtracts each session's first observed value.</footer>
 </div>
 <script>
 const D=__DATA__;
@@ -174,6 +191,11 @@ const turns=Object.entries(bySid).filter(([sid])=>SESS[sid].major).flatMap(([sid
 const branchSwitches=Object.entries(bySid).filter(([sid])=>SESS[sid].major).flatMap(([sid,rows])=>rows.filter((r,i)=>i&&r.branch&&r.branch!==rows[i-1].branch).map(r=>({t:r.ts,sid,branch:r.branch})));
 const spend=Object.values(bySid).reduce((a,rows)=>a+rows.at(-1).cost_usd-rows[0].cost_usd,0);
 const fable=D.limits.at(-1);
+const cacheRows=D.samples.filter(r=>r.cr!=null);
+const cacheIn=r=>r.ui+r.cw+r.cr;
+const cacheHit=cacheRows.reduce((a,r)=>a+r.cr,0)/Math.max(1,cacheRows.reduce((a,r)=>a+cacheIn(r),0))*100;
+const fmtS=ms=>ms>=60000?(ms/60000).toFixed(1)+"m":(ms/1000).toFixed(ms<10000?1:0)+"s";
+const apiMs=D.api.reduce((a,r)=>a+r.ms,0);
 const fableSeries=D.limits.filter(r=>r.model===fable.model);
 const elapsedPct=r=>Math.max(0,Math.min(100,(r.ts-(r.resets_at-WEEK))/WEEK*100));
 // Usage only rises within a window and a session waking from idle reports the window
@@ -194,6 +216,8 @@ const kp=[["Sessions",String(D.sessions.length),(minor?minor+" with no spend · 
  ["Compactions",String(compactions.length),compactions.length?"largest "+fmtK(Math.max(...compactions.map(c=>c.from-c.to)))+" tokens":"none seen yet"],
  ["Peak context",Math.max(...D.samples.map(r=>r.ctx_pct))+"%","ctx: in the statusline"],
  ...week.length?[["Weekly used",`${weekUsed}%<span>/${weekElapsed.toFixed(0)}%</span>`,`all models<br>used / week gone<br>${weekPace>0?"▲":"▼"} ${Math.abs(weekPace).toFixed(0)} pts ${weekPace>0?"over":"under"} pace<br>resets ${fmtW(d7r)}`]]:[],
+ ...D.apiPct.n?[["API time / request",fmtS(D.apiPct.p50),`median · p90 ${fmtS(D.apiPct.p90)}<br>${D.apiPct.n.toLocaleString()} requests · ${(apiMs/3600000).toFixed(1)}h total${D.apiPct.merged?`<br>${D.apiPct.merged.toLocaleString()} overlapping left out`:""}`]]:[],
+ ...cacheRows.length?[["Cache hits",cacheHit.toFixed(0)+"%","of input tokens read from cache"]]:[],
  [fable.model+" weekly",fable.used_pct+"%","resets "+fmtW(fable.resets_at)]];
 $("#kpis").innerHTML=kp.map(([l,v,s])=>`<div class="kpi"><span>${l}</span><b>${v}</b><small>${s}</small></div>`).join("");
 
@@ -254,7 +278,7 @@ function timeBars(el,bars,{yFmt=v=>v,h=300,W=520,legendEl,series,tipFmt}){
   el.querySelectorAll(".bar").forEach(r=>{r.addEventListener("mousemove",e=>T.show(e,tipFmt(bars[+r.dataset.i])));r.addEventListener("mouseleave",T.hide);});
 }
 
-function histogram(el,labels,series,{h=300,W=520,legendEl}){
+function histogram(el,labels,series,{h=300,W=520,legendEl,unit="tokens",count="turns"}){
   const m={t:14,r:16,b:28,l:36},H=h,max=Math.max(...series.flatMap(s=>s.counts));
   const F=frame({W,H,m,ys:[max],yFmt:v=>Math.round(v),xTicks:false});const {y}=F;
   const slot=(W-m.l-m.r)/labels.length,bw=Math.min(22,(slot-8)/series.length);
@@ -265,7 +289,7 @@ function histogram(el,labels,series,{h=300,W=520,legendEl}){
   el.innerHTML=`<svg viewBox="0 0 ${W} ${H}">${svg}</svg><div class="tip"></div>`;
   legend(legendEl,series);
   const T=attachTip(el,el.querySelector("svg"));
-  el.querySelectorAll(".bar").forEach(r=>{r.addEventListener("mousemove",e=>{const s=series[+r.dataset.s],i=+r.dataset.b;T.show(e,`<b>${labels[i]} tokens</b><br>${s.name}: <b>${s.counts[i]}</b> turns`);});r.addEventListener("mouseleave",T.hide);});
+  el.querySelectorAll(".bar").forEach(r=>{r.addEventListener("mousemove",e=>{const s=series[+r.dataset.s],i=+r.dataset.b;T.show(e,`<b>${labels[i]} ${unit}</b><br>${s.name}: <b>${s.counts[i].toLocaleString()}</b> ${count}`);});r.addEventListener("mouseleave",T.hide);});
 }
 
 function heatmap(el,grid,{W=520,legendEl}){
@@ -319,6 +343,15 @@ lineChart($("#c7"),sessSeries(r=>r.cca??0),{yFmt:v=>fmtK(v),h:300,W:520,legendEl
 
 const edges=[0,100,250,500,1000,2000,Infinity],labels=edges.slice(0,-1).map((e,i)=>edges[i+1]===Infinity?e+"+":e+"–"+edges[i+1]);
 histogram($("#c8"),labels,MAJOR.map(s=>({name:SESS[s.sid].name,color:SESS[s.sid].color,counts:edges.slice(0,-1).map((e,i)=>turns.filter(t=>t.sid===s.sid&&t.out>=e&&t.out<edges[i+1]).length)})),{legendEl:$("#lg8")});
+
+const apiLabels=["<1","1–2","2–4","4–8","8–16","16–32","32–64","64+"];
+histogram($("#c10"),apiLabels,[{name:"Requests",color:"var(--s1)",counts:apiLabels.map((_,b)=>D.api.filter(r=>r.b===b).reduce((a,r)=>a+r.n,0))}],{legendEl:$("#lg10"),unit:"seconds",count:"requests"});
+const apiHours=new Map();for(const r of D.api){const h=apiHours.get(r.hour)??{n:0,ms:0};h.n+=r.n;h.ms+=r.ms;apiHours.set(r.hour,h);}
+lineChart($("#c11"),[{name:"Mean per request",label:"mean",color:"var(--s1)",pts:[...apiHours].map(([t,h])=>({t,y:h.ms/h.n/1000,n:h.n}))}],
+  {yFmt:v=>v.toFixed(0)+"s",h:300,W:520,legendEl:$("#lg11"),gap:3600,tipFmt:p=>p.y.toFixed(1)+"s · "+p.n+" requests",bands:idle});
+lineChart($("#c12"),MAJOR.map(s=>({name:legendName(s),label:SESS[s.sid].name,color:SESS[s.sid].color,pts:bySid[s.sid].filter(r=>r.cr!=null&&cacheIn(r)).map(r=>({t:r.ts,y:r.cr/cacheIn(r)*100,r}))})).filter(s=>s.pts.length),
+  {yFmt:v=>v+"%",yMax:100,legendEl:$("#lg12"),gap:GAP,bands:idle,tipFmt:p=>`${p.y.toFixed(0)}% · read ${fmtK(p.r.cr)} · wrote ${fmtK(p.r.cw)} · uncached ${fmtK(p.r.ui)}`});
+if(!cacheRows.length)$("#cache-note").textContent="No cache data yet: it is recorded from this statusline version on.";
 
 const grid=Array.from({length:7},()=>Array(24).fill(0));
 for(const r of D.samples){const d=new Date(r.ts*1000);grid[(d.getDay()+6)%7][d.getHours()]++;}

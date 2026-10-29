@@ -80,6 +80,15 @@ struct ContextWindow {
     total_input_tokens: Option<i64>,
     total_output_tokens: Option<i64>,
     context_window_size: Option<i64>,
+    /// Token split of the last API call; null until the first one.
+    current_usage: Option<CurrentUsage>,
+}
+
+#[derive(Deserialize)]
+struct CurrentUsage {
+    input_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -458,6 +467,7 @@ fn main() {
     if !cli.no_history
         && let Some(session_id) = data.session_id
     {
+        let usage = data.context_window.current_usage.as_ref();
         history::record(&Sample {
             session_id,
             cwd: data.workspace.current_dir,
@@ -469,6 +479,9 @@ fn main() {
             input_tokens: data.context_window.total_input_tokens,
             output_tokens: data.context_window.total_output_tokens,
             ctx_size: data.context_window.context_window_size,
+            uncached_in: usage.and_then(|u| u.input_tokens),
+            cache_write: usage.and_then(|u| u.cache_creation_input_tokens),
+            cache_read: usage.and_then(|u| u.cache_read_input_tokens),
             cost_usd: data.cost.total_cost_usd,
             duration_ms: data.cost.total_duration_ms,
             api_ms: data.cost.total_api_duration_ms,
@@ -603,12 +616,17 @@ mod tests {
         let json = r#"{
             "model": {"display_name": "Claude Fable 5"},
             "workspace": {"current_dir": "/home/user/project"},
-            "context_window": {"used_percentage": 42.5},
+            "context_window": {"used_percentage": 42.5, "current_usage": {"input_tokens": 3,
+                "output_tokens": 50, "cache_creation_input_tokens": 200, "cache_read_input_tokens": 9000}},
             "cost": {"total_cost_usd": 1.23},
             "rate_limits": {"five_hour": {"used_percentage": 15.0}, "seven_day": {"used_percentage": 42.0}}
         }"#;
         let data: Input = serde_json::from_str(json).unwrap();
         assert_eq!(data.context_window.used_percentage, Some(42.5));
+        let usage = data.context_window.current_usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(3));
+        assert_eq!(usage.cache_creation_input_tokens, Some(200));
+        assert_eq!(usage.cache_read_input_tokens, Some(9000));
         assert_eq!(data.cost.total_cost_usd, Some(1.23));
         let rl = data.rate_limits.unwrap();
         assert_eq!(rl.five_hour.unwrap().used_percentage, Some(15.0));

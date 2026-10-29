@@ -6,7 +6,8 @@
 //! opens. The database is opened read-only per request, so the page always
 //! reflects what the statusline has recorded. Both `/` and `/data.json` take
 //! `?days=N` (default 30, `all` for everything) to bound the samples returned, and
-//! `?bucket=N` (seconds, default 60, `0` for raw) to downsample them.
+//! `?bucket=N` (seconds, default 60, `0` for raw) to downsample them. Per-request API
+//! times are always derived from the raw samples.
 
 use axum::{
     Router,
@@ -40,7 +41,8 @@ const DEFAULT_BUCKET: i64 = 60;
 const SAMPLES: &str = "SELECT ts, substr(session_id,1,8) sid, cwd, model_id, model, ctx_pct,
     input_tokens, output_tokens, cost_usd, duration_ms, api_ms, cc_lines_added cca,
     cc_lines_removed ccr, diff_added da, diff_removed dr, branch, five_hour_pct h5,
-    five_hour_resets h5r, seven_day_pct d7, seven_day_resets d7r
+    five_hour_resets h5r, seven_day_pct d7, seven_day_resets d7r, uncached_in ui,
+    cache_write cw, cache_read cr
     FROM (SELECT *,
         row_number() OVER (PARTITION BY session_id, ts / ?2 ORDER BY ts DESC, rowid DESC) rn,
         row_number() OVER w seq,
@@ -52,6 +54,42 @@ const SAMPLES: &str = "SELECT ts, substr(session_id,1,8) sid, cwd, model_id, mod
     ORDER BY ts";
 const LIMITS: &str =
     "SELECT ts, model, used_pct, resets_at FROM usage_limits WHERE ts >= ?1 ORDER BY ts";
+/// Per-request API time. Claude Code's cumulative `total_api_duration_ms` moves once
+/// per completed API call, so each increase is a request's duration. Overlapping
+/// requests (parallel subagents) land as one increase longer than the wall time since
+/// the previous one finished; those are flagged `merged` and left out of the
+/// latencies. Read from the raw samples, since downsampling would merge them too.
+macro_rules! requests {
+    () => {
+        "WITH c AS (SELECT session_id, ts,
+            api_ms - lag(api_ms) OVER (PARTITION BY session_id ORDER BY ts, rowid) ms
+            FROM samples WHERE ts >= ?1),
+        d AS (SELECT ts, ms,
+            ms > (ts - lag(ts) OVER (PARTITION BY session_id ORDER BY ts)) * 1000 + 1000 merged
+            FROM c WHERE ms > 0) "
+    };
+}
+/// Single-request counts per hour and power-of-two second bucket (0 is under 1 s,
+/// 7 is 64 s and over), which keeps a month of requests to a few thousand rows.
+const API_TIME: &str = concat!(
+    requests!(),
+    "SELECT ts / 3600 * 3600 hour,
+        CASE WHEN ms < 1000 THEN 0 WHEN ms < 2000 THEN 1 WHEN ms < 4000 THEN 2
+            WHEN ms < 8000 THEN 3 WHEN ms < 16000 THEN 4 WHEN ms < 32000 THEN 5
+            WHEN ms < 64000 THEN 6 ELSE 7 END b,
+        count(*) n, sum(ms) ms
+    FROM d WHERE NOT merged GROUP BY hour, b ORDER BY hour, b"
+);
+/// Exact median and 90th percentile of single requests, and how many were merged.
+const API_PCT: &str = concat!(
+    requests!(),
+    ", r AS (SELECT ms, row_number() OVER (ORDER BY ms) i, count(*) OVER () n
+        FROM d WHERE NOT merged)
+    SELECT (SELECT max(n) FROM r) n,
+        (SELECT ms FROM r WHERE i = (n + 1) / 2) p50,
+        (SELECT ms FROM r WHERE i = (9 * n + 9) / 10) p90,
+        (SELECT count(*) FROM d WHERE merged IS NOT 0) merged"
+);
 const SESSIONS: &str = "SELECT substr(session_id,1,8) sid, first_seen, last_seen, cwd, cc_version
     FROM sessions WHERE last_seen >= ?1 ORDER BY first_seen";
 
@@ -91,6 +129,8 @@ fn load(conn: &Connection, since: i64, bucket: i64) -> rusqlite::Result<Value> {
         "samples": query(conn, SAMPLES, [since, bucket])?,
         "limits": query(conn, LIMITS, [since])?,
         "sessions": query(conn, SESSIONS, [since])?,
+        "api": query(conn, API_TIME, [since])?,
+        "apiPct": query(conn, API_PCT, [since])?[0].take(),
     }))
 }
 
