@@ -353,6 +353,7 @@ const cacheHours=new Map();for(const r of cacheRows){const t=Math.floor(r.ts/360
 lineChart($("#c12"),[{name:"All sessions",label:"hit",color:"var(--s1)",pts:[...cacheHours].filter(([,h])=>h.rd+h.wr+h.un).map(([t,h])=>({t,y:h.rd/(h.rd+h.wr+h.un)*100,h}))}],
   {yFmt:v=>v+"%",yMax:100,legendEl:$("#lg12"),gap:3600,bands:idle,tipFmt:p=>`${p.y.toFixed(0)}% · read ${fmtK(p.h.rd)} · wrote ${fmtK(p.h.wr)} · uncached ${fmtK(p.h.un)}`});
 if(!cacheRows.length)$("#cache-note").textContent="No cache data yet: it is recorded from this statusline version on.";
+else if(cacheRows[0].ts-t0>86400)$("#cache-note").textContent+=` Recorded since ${fmtW(cacheRows[0].ts)}: ${cacheHours.size} hour${cacheHours.size>1?"s":""} so far, at the right edge.`;
 
 const grid=Array.from({length:7},()=>Array(24).fill(0));
 for(const r of D.samples){const d=new Date(r.ts*1000);grid[(d.getDay()+6)%7][d.getHours()]++;}
