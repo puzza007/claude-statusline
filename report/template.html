@@ -46,6 +46,11 @@ header .path{color:var(--muted);font-size:12px;margin-top:8px}
 .chart .bar{shape-rendering:crispEdges}
 .chart .bar:hover,.chart .cell:hover{opacity:.75}
 .chart .cell{stroke:var(--surface);stroke-width:1.5}
+.chart svg.zoom{cursor:crosshair;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.chart .sel{fill:var(--s1);opacity:.18;pointer-events:none}
+.zoombar{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:3;display:flex;align-items:center;gap:12px;max-width:calc(100vw - 32px);background:var(--ink);color:var(--page);font-size:12px;padding:6px 6px 6px 12px;border-radius:6px;white-space:nowrap}
+.zoombar[hidden]{display:none}
+.zoombar button{font:inherit;color:inherit;background:none;border:1px solid currentColor;border-radius:4px;padding:3px 8px;cursor:pointer}
 .pace{font-size:12px;color:var(--ink-2)}
 .pace b{font-weight:500}
 .note{font-size:12px;color:var(--muted);margin:0}
@@ -72,6 +77,7 @@ footer{color:var(--muted);font-size:12px;max-width:65ch}
   <h1>Statusline History</h1>
   <p class="sub" id="sub">Data collected by <code class="mono">claude-statusline</code>, sampled on every state change.</p>
   <div class="path mono" id="range"></div>
+  <p class="note">Drag across any chart with a time axis to zoom all of them; double-click to reset. KPIs, tables, the histograms and the heatmap keep showing the whole window.</p>
 </header>
 <section class="kpis" id="kpis"></section>
 <section class="panel">
@@ -151,6 +157,7 @@ footer{color:var(--muted);font-size:12px;max-width:65ch}
 </section>
 <footer>Source: <code class="mono">~/.local/share/claude-statusline/history.db</code> — tables <code class="mono">samples</code> (including the last request's cache split in <code class="mono">uncached_in</code>, <code class="mono">cache_write</code>, <code class="mono">cache_read</code>), <code class="mono">sessions</code>, <code class="mono">usage_limits</code>. Times shown in your local zone. Rate-limit lines take the max across sessions per 3-minute bucket, because a session waking from idle first reports the values it last saw. Costs are Claude Code's cumulative <code class="mono">total_cost_usd</code>; the spend chart subtracts each session's first observed value.</footer>
 </div>
+<div class="zoombar mono" id="zoombar" role="status" hidden><span id="zoomtext"></span><button type="button" id="zoomreset">Reset zoom</button></div>
 <script>
 const D=__DATA__;
 const SLOTS=["var(--s1)","var(--s2)","var(--s3)","var(--s4)","var(--s5)","var(--s6)"];
@@ -180,6 +187,9 @@ const legendName=s=>{const i=SESS[s.sid],dup=MAJOR.filter(o=>SESS[o.sid].name===
 const minor=D.sessions.length-MAJOR.length;
 const t0=Math.min(...D.samples.map(r=>r.ts)),t1=Math.max(...D.samples.map(r=>r.ts),...D.limits.map(r=>r.ts));
 if(t1-t0>20*3600)fmtX=fmtD;
+// The time range the charts show. Dragging narrows it; every time chart redraws to it.
+let vt0=t0,vt1=t1;
+const fmtV=ts=>{const span=vt1-vt0;return span>20*3600?fmtD(ts):span<600?new Date(ts*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}):fmtT(ts);};
 
 // ---- derived ---------------------------------------------------------------
 const compactions=[];
@@ -225,57 +235,84 @@ $("#kpis").innerHTML=kp.map(([l,v,s])=>`<div class="kpi"><span>${l}</span><b>${v
 function frame({W=800,H=260,m={t:14,r:70,b:28,l:44},yMin=0,yMax,ys=[],ticks=5,yFmt=v=>v,xTicks=true}){
   const lo=yMin;let hi=yMax;
   if(hi==null){const raw=Math.max(1e-9,...ys)*1.05/ticks,p=10**Math.floor(Math.log10(raw));hi=[1,2,2.5,5,10].map(k=>k*p).find(st=>st>=raw)*ticks;}
-  const x=t=>m.l+(t-t0)/(t1-t0)*(W-m.l-m.r), y=v=>m.t+(1-(v-lo)/(hi-lo))*(H-m.t-m.b);
+  const x=t=>m.l+(t-vt0)/(vt1-vt0)*(W-m.l-m.r), y=v=>m.t+(1-(v-lo)/(hi-lo))*(H-m.t-m.b);
   let g="";
   for(let i=0;i<=ticks;i++){const v=lo+(hi-lo)*i/ticks;g+=`<line class="${i?'grid':'base'}" x1="${m.l}" x2="${W-m.r}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${m.l-8}" y="${y(v)+4}" text-anchor="end">${yFmt(v)}</text>`;}
-  if(xTicks)for(let i=0;i<=5;i++){const t=t0+(t1-t0)*i/5;g+=`<text class="axis" x="${x(t)}" y="${H-8}" text-anchor="middle">${fmtX(t)}</text>`;}
+  if(xTicks)for(let i=0;i<=5;i++){const t=vt0+(vt1-vt0)*i/5;g+=`<text class="axis" x="${x(t)}" y="${H-8}" text-anchor="middle">${fmtV(t)}</text>`;}
   return {W,H,m,lo,hi,x,y,g};
 }
 function attachTip(el,svg){const tip=el.querySelector(".tip");const show=(e,html)=>{const r=svg.getBoundingClientRect();tip.innerHTML=html;tip.style.display="block";tip.style.left=(e.clientX-r.left)+"px";tip.style.top=(e.clientY-r.top)+"px";};const hide=()=>tip.style.display="none";return {show,hide};}
+function brush(el,F){
+  const svg=el.querySelector("svg"),{m,W,H}=F,sel=document.createElementNS("http://www.w3.org/2000/svg","rect");
+  const toX=e=>{const r=svg.getBoundingClientRect();return Math.max(m.l,Math.min(W-m.r,(e.clientX-r.left)/r.width*W));};
+  const toT=sx=>vt0+(sx-m.l)/(W-m.l-m.r)*(vt1-vt0);
+  sel.setAttribute("class","sel");sel.setAttribute("y",m.t);sel.setAttribute("height",H-m.t-m.b);sel.style.display="none";svg.append(sel);svg.classList.add("zoom");
+  let start=null;
+  const paint=sx=>{sel.setAttribute("x",Math.min(start,sx));sel.setAttribute("width",Math.abs(sx-start));};
+  svg.addEventListener("pointerdown",e=>{if(e.button)return;start=toX(e);svg.setPointerCapture(e.pointerId);paint(start);sel.style.display="";el.querySelector(".tip").style.display="none";});
+  svg.addEventListener("pointermove",e=>{if(start!=null)paint(toX(e));});
+  svg.addEventListener("pointerup",e=>{if(start==null)return;const a=start,b=toX(e);start=null;sel.style.display="none";if(Math.abs(b-a)>=6)setView(toT(Math.min(a,b)),toT(Math.max(a,b)));});
+  svg.addEventListener("pointercancel",()=>{start=null;sel.style.display="none";});
+  svg.addEventListener("dblclick",()=>setView(t0,t1));
+}
 function legend(el,series){if(el)el.innerHTML=series.map(s=>`<span><i style="background:${s.color};${s.dash?"height:0;border-top:3px dashed "+s.color+";background:none":""}"></i>${s.name}</span>`).join("");}
 
 // markers are points on a series ({t,y,color,tip}), or ticks under the axis when y is
 // omitted; their tip joins the crosshair tooltip.
 // gap (seconds) breaks a line where a series has no samples for that long.
-function lineChart(el,series,{yFmt=v=>v,yMax,h=260,W=800,ticks=5,step=false,legendEl,tipFmt,markers=[],bands=[],gap=Infinity}={}){
-  const F=frame({W,H:h,yMax,ys:series.flatMap(s=>s.pts.map(p=>p.y)),ticks,yFmt});
+function lineChart(el,series,{yFmt=v=>v,yMax,h=260,W=800,ticks=5,step=false,legendEl,tipFmt,markers=[],bands=[],gap=Infinity,bucket=0}={}){
+  // Points in view set the y scale and get dots; one more each side runs the line off the
+  // plot edge. A step line's held value is on screen too, and bucket is how many seconds
+  // from its timestamp a point speaks for.
+  const views=series.map(({pts})=>{const n=pts.length;let a=0,b=n;
+    while(a<n&&pts[a].t+bucket<vt0)a++;
+    while(b>a&&pts[b-1].t>vt1)b--;
+    return {inView:pts.slice(a,b),scale:pts.slice(step&&a?a-1:a,b),drawn:pts.slice(Math.max(0,a-1),Math.min(n,b+1))};});
+  const F=frame({W,H:h,yMax,ys:views.flatMap(v=>v.scale.map(p=>p.y)),ticks,yFmt});
   const {m,x,y}=F;
   // Bands narrower than 2px read as noise at multi-day spans.
   const bandSvg=bands.filter(b=>x(b.b)-x(b.a)>=2).map(b=>`<rect class="band" x="${x(b.a)}" y="${m.t}" width="${x(b.b)-x(b.a)}" height="${F.H-m.t-m.b}"/>`).join("");
-  const markSvg=markers.map(k=>k.y==null?`<line class="rug" x1="${x(k.t)}" x2="${x(k.t)}" y1="${y(F.lo)+2}" y2="${y(F.lo)+7}" stroke="${k.color}"/>`:`<circle class="mark" cx="${x(k.t)}" cy="${y(k.y)}" r="4" stroke="${k.color}"/>`).join("");
+  const markSvg=markers.filter(k=>k.t>=vt0&&k.t<=vt1).map(k=>k.y==null?`<line class="rug" x1="${x(k.t)}" x2="${x(k.t)}" y1="${y(F.lo)+2}" y2="${y(F.lo)+7}" stroke="${k.color}"/>`:`<circle class="mark" cx="${x(k.t)}" cy="${y(k.y)}" r="4" stroke="${k.color}"/>`).join("");
   const ends=[];
-  const paths=series.map(s=>{
-    const pts=s.pts.map(p=>[x(p.t),y(p.y)]);if(!pts.length)return"";
-    let d="";pts.forEach(([px,py],i)=>{d+=!i||s.pts[i].t-s.pts[i-1].t>gap?`M${px},${py}`:step?`H${px}V${py}`:`L${px},${py}`;});
-    const last=pts.at(-1);ends.push({x:last[0],y:last[1],label:s.label,color:s.color});
-    return `<path class="line${s.dash?" dash":""}" d="${d}" stroke="${s.color}"/>`+(pts.length<=12?pts.map(([px,py])=>`<circle class="dot" cx="${px}" cy="${py}" r="3.5" fill="${s.color}"/>`).join(""):"")+
-      `<circle cx="${last[0]}" cy="${last[1]}" r="4" fill="${s.color}" class="dot"/>`;});
+  let lines="",dots="";
+  series.forEach((s,n)=>{
+    const {inView,drawn}=views[n];
+    let d="";drawn.forEach((p,i)=>{const px=x(p.t),py=y(p.y);d+=!i||p.t-drawn[i-1].t>gap?`M${px},${py}`:step?`H${px}V${py}`:`L${px},${py}`;});
+    if(d)lines+=`<path class="line${s.dash?" dash":""}" d="${d}" stroke="${s.color}"/>`;
+    if(!inView.length)return;
+    if(inView.length<=12)for(const p of inView)dots+=`<circle class="dot" cx="${x(p.t)}" cy="${y(p.y)}" r="3.5" fill="${s.color}"/>`;
+    const last=inView.at(-1);ends.push({x:x(last.t),y:y(last.y),label:s.label,color:s.color});
+    dots+=`<circle cx="${x(last.t)}" cy="${y(last.y)}" r="4" fill="${s.color}" class="dot"/>`;});
   // End labels: push apart vertically so none overlap, then pull back inside the plot.
   ends.sort((a,b)=>a.y-b.y).forEach(e=>e.ly=e.y);
   for(let i=1;i<ends.length;i++)ends[i].ly=Math.max(ends[i].ly,ends[i-1].ly+12);
   const over=ends.length?ends.at(-1).ly-(F.H-m.b-2):0;if(over>0)ends.forEach(e=>e.ly-=over);
   const endSvg=series.length>4?"":ends.map(e=>`<text class="lbl" x="${e.x+8}" y="${e.ly+4}">${e.label}</text>`).join("");
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${F.H}">${bandSvg}${F.g}${paths.join("")}${markSvg}${endSvg}<line class="x" y1="${m.t}" y2="${F.H-m.b}" style="display:none"/><rect x="${m.l}" y="${m.t}" width="${W-m.l-m.r}" height="${F.H-m.t-m.b}" fill="transparent" class="hit"/></svg><div class="tip"></div>`;
+  const clip=`clip-${el.id}`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${F.H}"><defs><clipPath id="${clip}"><rect x="${m.l}" y="${m.t-2}" width="${W-m.l-m.r}" height="${F.H-m.t-m.b+4}"/></clipPath></defs><g clip-path="url(#${clip})">${bandSvg}</g>${F.g}<g clip-path="url(#${clip})">${lines}</g>${dots}${markSvg}${endSvg}<line class="x" y1="${m.t}" y2="${F.H-m.b}" style="display:none"/><rect x="${m.l}" y="${m.t}" width="${W-m.l-m.r}" height="${F.H-m.t-m.b}" fill="transparent" class="hit"/></svg><div class="tip"></div>`;
   legend(legendEl,series);
   const svg=el.querySelector("svg"),xh=el.querySelector(".x"),T=attachTip(el,svg);
   el.querySelector(".hit").addEventListener("mousemove",e=>{
-    const r=svg.getBoundingClientRect();const sx=(e.clientX-r.left)/r.width*W;const t=t0+(sx-m.l)/(W-m.l-m.r)*(t1-t0);
+    const r=svg.getBoundingClientRect();const sx=(e.clientX-r.left)/r.width*W;const t=vt0+(sx-m.l)/(W-m.l-m.r)*(vt1-vt0);
     const rows=series.map(s=>{let best=null;for(const p of s.pts){if(p.t<=t)best=p;}return best&&t-best.t<=gap&&{s,p:best};}).filter(Boolean);
     const near=markers.filter(k=>Math.abs(x(k.t)-sx)<=6);
     if(!rows.length){T.hide();xh.style.display="none";return;}
     xh.setAttribute("x1",sx);xh.setAttribute("x2",sx);xh.style.display="";
-    T.show(e,`<b>${fmtX(t)}</b><br>`+rows.map(({s,p})=>`<span style="color:${s.color}">●</span> ${s.name}: <b>${tipFmt?tipFmt(p,s):yFmt(p.y)}</b>`).join("<br>")+near.map(k=>`<br><span style="color:${k.color}">○</span> ${k.tip}`).join(""));
+    T.show(e,`<b>${fmtV(t)}</b><br>`+rows.map(({s,p})=>`<span style="color:${s.color}">●</span> ${s.name}: <b>${tipFmt?tipFmt(p,s):yFmt(p.y)}</b>`).join("<br>")+near.map(k=>`<br><span style="color:${k.color}">○</span> ${k.tip}`).join(""));
   });
   el.querySelector(".hit").addEventListener("mouseleave",()=>{T.hide();xh.style.display="none";});
+  brush(el,F);
 }
 
-function timeBars(el,bars,{yFmt=v=>v,h=300,W=520,legendEl,series,tipFmt}){
+function timeBars(el,allBars,{yFmt=v=>v,h=300,W=520,legendEl,series,tipFmt}){
+  const bars=allBars.filter(b=>b.t>=vt0&&b.t<=vt1);
   const F=frame({W,H:h,ys:bars.map(b=>b.y),yFmt});const {m,x,y}=F;
   const rects=bars.map((b,i)=>`<rect class="bar" data-i="${i}" x="${x(b.t)-1.5}" y="${y(b.y)}" width="3" height="${Math.max(1,y(0)-y(b.y))}" fill="${b.color}" rx="1"/>`).join("");
   el.innerHTML=`<svg viewBox="0 0 ${W} ${F.H}">${F.g}${rects}</svg><div class="tip"></div>`;
   legend(legendEl,series);
   const T=attachTip(el,el.querySelector("svg"));
   el.querySelectorAll(".bar").forEach(r=>{r.addEventListener("mousemove",e=>T.show(e,tipFmt(bars[+r.dataset.i])));r.addEventListener("mouseleave",T.hide);});
+  brush(el,F);
 }
 
 function histogram(el,labels,series,{h=300,W=520,legendEl,unit="tokens",count="turns"}){
@@ -310,36 +347,48 @@ function heatmap(el,grid,{W=520,legendEl}){
 // Sessions with no samples for two hours are drawn as separate runs rather than
 // joined by a line across the gap.
 const GAP=7200;
+const timeCharts=[];
+const timeChart=draw=>{timeCharts.push(draw);draw();};
+function setView(a,b){
+  // Keep at least a minute in view so a tiny drag still leaves readable axis labels.
+  if(b-a<60){const c=(a+b)/2;a=c-30;b=c+30;}
+  vt0=Math.max(t0,a);vt1=Math.min(t1,b);
+  timeCharts.forEach(draw=>draw());
+  const zoomed=vt0>t0||vt1<t1;
+  $("#zoombar").hidden=!zoomed;
+  if(zoomed)$("#zoomtext").textContent=fmtV(vt0)+" → "+fmtV(vt1);
+}
+$("#zoomreset").addEventListener("click",()=>setView(t0,t1));
 const sessSeries=key=>MAJOR.map(s=>({name:legendName(s),label:SESS[s.sid].name,color:SESS[s.sid].color,pts:bySid[s.sid].map(r=>({t:r.ts,y:key(r,bySid[s.sid][0]),r}))}));
 
-lineChart($("#c1"),sessSeries(r=>r.input_tokens),{yFmt:v=>fmtK(v),legendEl:$("#lg1"),tipFmt:p=>fmtK(p.y)+" tokens · ctx "+p.r.ctx_pct+"% · ⎇ "+p.r.branch,
+timeChart(()=>lineChart($("#c1"),sessSeries(r=>r.input_tokens),{yFmt:v=>fmtK(v),legendEl:$("#lg1"),tipFmt:p=>fmtK(p.y)+" tokens · ctx "+p.r.ctx_pct+"% · ⎇ "+p.r.branch,
   gap:GAP,
-  markers:compactions.filter(c=>SESS[c.sid].major).map(c=>({t:c.tp,y:c.from,color:SESS[c.sid].color,tip:`${SESS[c.sid].name} compacted ${fmtK(c.from)}→${fmtK(c.to)}`})),bands:idle});
+  markers:compactions.filter(c=>SESS[c.sid].major).map(c=>({t:c.tp,y:c.from,color:SESS[c.sid].color,tip:`${SESS[c.sid].name} compacted ${fmtK(c.from)}→${fmtK(c.to)}`})),bands:idle}));
 
-lineChart($("#c2"),sessSeries((r,f)=>r.cost_usd-f.cost_usd),{yFmt:v=>"$"+v.toFixed(0),h:300,W:520,legendEl:$("#lg2"),gap:GAP,tipFmt:p=>"$"+p.y.toFixed(2)+" (total $"+p.r.cost_usd.toFixed(2)+")"});
+timeChart(()=>lineChart($("#c2"),sessSeries((r,f)=>r.cost_usd-f.cost_usd),{yFmt:v=>"$"+v.toFixed(0),h:300,W:520,legendEl:$("#lg2"),gap:GAP,tipFmt:p=>"$"+p.y.toFixed(2)+" (total $"+p.r.cost_usd.toFixed(2)+")"}));
 
-timeBars($("#c4"),turns.map(t=>({t:t.t,y:t.cost,color:SESS[t.sid].color,sid:t.sid,out:t.out})),{yFmt:v=>"$"+(v<1?v.toFixed(2):v.toFixed(1)),legendEl:$("#lg4"),
-  series:MAJOR.map(s=>({name:SESS[s.sid].name,color:SESS[s.sid].color})),tipFmt:b=>`<b>${fmtX(b.t)}</b> ${SESS[b.sid].name}<br>$${b.y.toFixed(3)} · ${b.out} output tokens`});
+timeChart(()=>timeBars($("#c4"),turns.map(t=>({t:t.t,y:t.cost,color:SESS[t.sid].color,sid:t.sid,out:t.out})),{yFmt:v=>"$"+(v<1?v.toFixed(2):v.toFixed(1)),legendEl:$("#lg4"),
+  series:MAJOR.map(s=>({name:SESS[s.sid].name,color:SESS[s.sid].color})),tipFmt:b=>`<b>${fmtV(b.t)}</b> ${SESS[b.sid].name}<br>$${b.y.toFixed(3)} · ${b.out} output tokens`}));
 
 // A session that wakes from idle first renders the rate limits it last saw, so
 // take the max across sessions per 3-minute bucket rather than the raw sequence.
 const bucketMax=key=>{const b=new Map();for(const r of D.samples){const k=Math.floor(r.ts/180)*180;b.set(k,Math.max(b.get(k)??0,r[key]));}return [...b].map(([t,y])=>({t,y}));};
-lineChart($("#c3"),[
+timeChart(()=>lineChart($("#c3"),[
   {name:fable.model+" weekly (usage API)",label:fable.model.toLowerCase(),color:"var(--s1)",pts:fableSeries.map(r=>({t:r.ts,y:r.used_pct}))},
   {name:"7-day (all models)",label:"7d",color:"var(--s2)",pts:bucketMax("d7")},
   {name:"5-hour",label:"5h",color:"var(--s3)",pts:bucketMax("h5")},
-],{yFmt:v=>v+"%",h:300,W:520,step:true,legendEl:$("#lg3")});
+],{yFmt:v=>v+"%",h:300,W:520,step:true,legendEl:$("#lg3")}));
 
 const pace=fable.used_pct-elapsedPct(fable);
 $("#pace").innerHTML=`<b>${pace>0?"▲":"▼"} ${Math.abs(pace).toFixed(0)} pts ${pace>0?"over":"under"} pace</b>`;
-lineChart($("#c5"),[
+timeChart(()=>lineChart($("#c5"),[
   {name:fable.model+" used",label:"used",color:"var(--s1)",pts:fableSeries.map(r=>({t:r.ts,y:r.used_pct}))},
   {name:"Week elapsed",label:"elapsed",color:"var(--muted)",dash:true,pts:fableSeries.map(r=>({t:r.ts,y:elapsedPct(r)}))},
-],{yFmt:v=>v+"%",yMax:100,h:300,W:520,step:true,legendEl:$("#pace-legend")});
+],{yFmt:v=>v+"%",yMax:100,h:300,W:520,step:true,legendEl:$("#pace-legend")}));
 $("#pace-note").textContent=`${fable.model} usage against the share of its 7-day window already elapsed (window started ${fmtW(fable.resets_at-WEEK)}). Below the dashed line means the budget outlasts the week at this rate.`;
 
-lineChart($("#c6"),sessSeries(r=>(r.da??0)+(r.dr??0)),{yFmt:v=>fmtK(v),h:300,W:520,legendEl:$("#lg6"),tipFmt:p=>`+${p.r.da??0} −${p.r.dr??0} · ⎇ ${p.r.branch}`,gap:GAP,markers:branchSwitches.map(b=>({t:b.t,color:SESS[b.sid].color,tip:`${SESS[b.sid].name} switched to ⎇ ${b.branch}`}))});
-lineChart($("#c7"),sessSeries(r=>r.cca??0),{yFmt:v=>fmtK(v),h:300,W:520,legendEl:$("#lg7"),gap:GAP,tipFmt:p=>`+${p.r.cca??0} −${p.r.ccr??0} lines`});
+timeChart(()=>lineChart($("#c6"),sessSeries(r=>(r.da??0)+(r.dr??0)),{yFmt:v=>fmtK(v),h:300,W:520,legendEl:$("#lg6"),tipFmt:p=>`+${p.r.da??0} −${p.r.dr??0} · ⎇ ${p.r.branch}`,gap:GAP,markers:branchSwitches.map(b=>({t:b.t,color:SESS[b.sid].color,tip:`${SESS[b.sid].name} switched to ⎇ ${b.branch}`}))}));
+timeChart(()=>lineChart($("#c7"),sessSeries(r=>r.cca??0),{yFmt:v=>fmtK(v),h:300,W:520,legendEl:$("#lg7"),gap:GAP,tipFmt:p=>`+${p.r.cca??0} −${p.r.ccr??0} lines`}));
 
 const edges=[0,100,250,500,1000,2000,Infinity],labels=edges.slice(0,-1).map((e,i)=>edges[i+1]===Infinity?e+"+":e+"–"+edges[i+1]);
 histogram($("#c8"),labels,MAJOR.map(s=>({name:SESS[s.sid].name,color:SESS[s.sid].color,counts:edges.slice(0,-1).map((e,i)=>turns.filter(t=>t.sid===s.sid&&t.out>=e&&t.out<edges[i+1]).length)})),{legendEl:$("#lg8")});
@@ -347,11 +396,11 @@ histogram($("#c8"),labels,MAJOR.map(s=>({name:SESS[s.sid].name,color:SESS[s.sid]
 const apiLabels=["<1","1–2","2–4","4–8","8–16","16–32","32–64","64+"];
 histogram($("#c10"),apiLabels,[{name:"Requests",color:"var(--s1)",counts:apiLabels.map((_,b)=>D.api.filter(r=>r.b===b).reduce((a,r)=>a+r.n,0))}],{legendEl:$("#lg10"),unit:"seconds",count:"requests"});
 const apiHours=new Map();for(const r of D.api){const h=apiHours.get(r.hour)??{n:0,ms:0};h.n+=r.n;h.ms+=r.ms;apiHours.set(r.hour,h);}
-lineChart($("#c11"),[{name:"Mean per request",label:"mean",color:"var(--s1)",pts:[...apiHours].map(([t,h])=>({t,y:h.ms/h.n/1000,n:h.n}))}],
-  {yFmt:v=>v.toFixed(0)+"s",h:300,W:520,legendEl:$("#lg11"),gap:3600,tipFmt:p=>p.y.toFixed(1)+"s · "+p.n+" requests",bands:idle});
+timeChart(()=>lineChart($("#c11"),[{name:"Mean per request",label:"mean",color:"var(--s1)",pts:[...apiHours].map(([t,h])=>({t,y:h.ms/h.n/1000,n:h.n}))}],
+  {yFmt:v=>v.toFixed(0)+"s",h:300,W:520,legendEl:$("#lg11"),gap:3600,tipFmt:p=>p.y.toFixed(1)+"s · "+p.n+" requests",bands:idle,bucket:3600}));
 const cacheHours=new Map();for(const r of cacheRows){const t=Math.floor(r.ts/3600)*3600,h=cacheHours.get(t)??{rd:0,wr:0,un:0};h.rd+=r.cr;h.wr+=r.cw;h.un+=r.ui;cacheHours.set(t,h);}
-lineChart($("#c12"),[{name:"All sessions",label:"hit",color:"var(--s1)",pts:[...cacheHours].filter(([,h])=>h.rd+h.wr+h.un).map(([t,h])=>({t,y:h.rd/(h.rd+h.wr+h.un)*100,h}))}],
-  {yFmt:v=>v+"%",yMax:100,legendEl:$("#lg12"),gap:3600,bands:idle,tipFmt:p=>`${p.y.toFixed(0)}% · read ${fmtK(p.h.rd)} · wrote ${fmtK(p.h.wr)} · uncached ${fmtK(p.h.un)}`});
+timeChart(()=>lineChart($("#c12"),[{name:"All sessions",label:"hit",color:"var(--s1)",pts:[...cacheHours].filter(([,h])=>h.rd+h.wr+h.un).map(([t,h])=>({t,y:h.rd/(h.rd+h.wr+h.un)*100,h}))}],
+  {yFmt:v=>v+"%",yMax:100,legendEl:$("#lg12"),gap:3600,bucket:3600,bands:idle,tipFmt:p=>`${p.y.toFixed(0)}% · read ${fmtK(p.h.rd)} · wrote ${fmtK(p.h.wr)} · uncached ${fmtK(p.h.un)}`}));
 if(!cacheRows.length)$("#cache-note").textContent="No cache data yet: it is recorded from this statusline version on.";
 else if(cacheRows[0].ts-t0>86400)$("#cache-note").textContent+=` Recorded since ${fmtW(cacheRows[0].ts)}: ${cacheHours.size} hour${cacheHours.size>1?"s":""} so far, at the right edge.`;
 
