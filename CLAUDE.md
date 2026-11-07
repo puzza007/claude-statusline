@@ -70,7 +70,9 @@ file, and swallows every error so the render is never broken. Schema changes are
 applied in its own transaction together with the `PRAGMA user_version` bump so an interrupted step
 is retried whole. `GitStatus` (in `main.rs`, including the uncommitted diff line counts) is hashed
 into the fingerprint; `Sample::fingerprint` destructures every field so adding one is a compile
-error until it is placed in or explicitly outside the hash. `samples.cwd` is
+error until it is placed in or explicitly outside the hash. `samples.uncached_in`/`cache_write`/`cache_read` hold the last API call's input split from
+`context_window.current_usage` (note `total_input_tokens`/`total_output_tokens` are also per-call
+values despite the name, not cumulative). `samples.cwd` is
 recorded per row (not just the latest on `sessions`) so a branch is always attributable to a repo. `--no-history` disables recording and is forwarded to the refresh child.
 
 Report (`report/`, workspace member `claude-statusline-report`): an axum service that serves the
@@ -83,7 +85,11 @@ request with a 500 ms busy timeout; `?days=N` (default 30, `all`) bounds the row
 not grow without limit; `?bucket=N` (seconds, default 60, `0` for effectively raw) keeps
 only the last sample per session per bucket, plus each session's first sample, compaction peaks and
 branch changes, so the page's spend, compaction and branch-switch numbers match the raw data at
-about a quarter of the size. Idle bands can be up to one bucket longer. `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
+about a quarter of the size. Idle bands can be up to one bucket longer. Per-request API time comes from the raw samples, not the downsampled
+ones: each increase in the cumulative `api_ms` is one request, except an increase longer than the
+wall time since the previous one, which is overlapping requests (parallel subagents) and is
+excluded. It is returned as counts per hour and power-of-two second bucket (`api`) plus exact
+p50/p90 (`apiPct`). `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
 is static) into a `scratch` image (a stub `src/main.rs` stands in for the statusline package so the
 workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data directory at
 `/data`, which must be the directory rather than the file so SQLite can use the `-wal`/`-shm`

@@ -22,7 +22,13 @@ use std::time::Duration;
 
 /// Applied in order, each in its own transaction that also bumps `user_version`,
 /// so a new step is a new entry here and never an edit to an earlier one.
-const MIGRATIONS: &[&str] = &[SCHEMA];
+const MIGRATIONS: &[&str] = &[
+    SCHEMA,
+    // The last API call's input split, for cache hit rates.
+    "ALTER TABLE samples ADD COLUMN uncached_in INTEGER;
+     ALTER TABLE samples ADD COLUMN cache_write INTEGER;
+     ALTER TABLE samples ADD COLUMN cache_read INTEGER;",
+];
 /// A sample is written even when nothing changed once this long has passed.
 const HEARTBEAT: i64 = 5 * 60;
 /// How often `sessions.last_seen` is bumped when nothing else changed.
@@ -96,6 +102,9 @@ pub struct Sample {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub ctx_size: Option<i64>,
+    pub uncached_in: Option<i64>,
+    pub cache_write: Option<i64>,
+    pub cache_read: Option<i64>,
     pub cost_usd: Option<f64>,
     pub duration_ms: Option<i64>,
     pub api_ms: Option<i64>,
@@ -127,6 +136,9 @@ impl Sample {
             input_tokens,
             output_tokens,
             ctx_size,
+            uncached_in,
+            cache_write,
+            cache_read,
             cost_usd,
             api_ms,
             cc_lines_added,
@@ -148,6 +160,7 @@ impl Sample {
             api_ms,
         )
             .hash(&mut h);
+        (uncached_in, cache_write, cache_read).hash(&mut h);
         (cc_lines_added, cc_lines_removed, git).hash(&mut h);
         (five_hour_resets, seven_day_resets).hash(&mut h);
         for pct in [ctx_pct, cost_usd, five_hour_pct, seven_day_pct] {
@@ -226,9 +239,9 @@ fn record_in(conn: &mut Connection, sample: &Sample, now: i64) -> rusqlite::Resu
                 output_tokens, ctx_size, cost_usd, duration_ms, api_ms, cc_lines_added,
                 cc_lines_removed, diff_added, diff_removed, branch, staged, modified, deleted,
                 untracked, conflicted, stashes, ahead, behind, five_hour_pct, five_hour_resets,
-                seven_day_pct, seven_day_resets)
+                seven_day_pct, seven_day_resets, uncached_in, cache_write, cache_read)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
             params![
                 now,
                 sample.session_id,
@@ -259,6 +272,9 @@ fn record_in(conn: &mut Connection, sample: &Sample, now: i64) -> rusqlite::Resu
                 sample.five_hour_resets,
                 sample.seven_day_pct,
                 sample.seven_day_resets,
+                sample.uncached_in,
+                sample.cache_write,
+                sample.cache_read,
             ],
         )?;
     }
@@ -428,6 +444,26 @@ mod tests {
     }
 
     #[test]
+    fn cache_split_round_trips_and_is_fingerprinted() {
+        let mut c = conn();
+        let mut s = sample();
+        s.cache_read = Some(9000);
+        s.cache_write = Some(200);
+        s.uncached_in = Some(3);
+        record_in(&mut c, &s, 1000).unwrap();
+        let row: (i64, i64, i64) = c
+            .query_row(
+                "SELECT uncached_in, cache_write, cache_read FROM samples",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (3, 200, 9000));
+        s.cache_read = Some(9500);
+        assert!(record_in(&mut c, &s, 1001).unwrap());
+    }
+
+    #[test]
     fn limits_are_recorded_per_model() {
         let mut c = conn();
         let limits = vec![
@@ -454,6 +490,15 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn v1_database_is_upgraded() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.pragma_update(None, "user_version", 1).unwrap();
+        init_schema(&mut c).unwrap();
+        assert!(record_in(&mut c, &sample(), 1000).unwrap());
     }
 
     #[test]
