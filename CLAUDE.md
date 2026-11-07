@@ -93,7 +93,9 @@ p50/p90 (`apiPct`). `report/Dockerfile` builds on `rust:1-alpine` (musl, so the 
 is static) into a `scratch` image (a stub `src/main.rs` stands in for the statusline package so the
 workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data directory at
 `/data`, which must be the directory rather than the file so SQLite can use the `-wal`/`-shm`
-files. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
+files. Dragging across a time chart narrows `vt0`/`vt1` and redraws every chart registered with
+`timeChart`, rescaling y to the points in view; KPIs, tables, histograms and the heatmap stay on the
+whole window. Zoom cannot show finer detail than `?bucket=N` delivered. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
 categorical slots and the rest are muted "other", tables only.
 
 `--report-url <url>` appends `↗` wrapped in an OSC 8 hyperlink (`ESC ] 8 ; ; url ST … ESC ] 8 ; ; ST`)
