@@ -78,8 +78,9 @@ recorded per row (not just the latest on `sessions`) so a branch is always attri
 Report (`report/`, workspace member `claude-statusline-report`): an axum service that serves the
 history as a chart page. `report/template.html` is the page; it has no document skeleton because
 the same file is published as a Claude artifact (which wraps it) and the server adds its own
-`<!doctype>`/`<head>`/`<body>`. The server replaces the single `__DATA__` token with JSON from three
-queries (`samples`, `usage_limits`, `sessions`, aliases as the template expects) and escapes every `<` in
+`<!doctype>`/`<head>`/`<body>`. The server replaces the single `__DATA__` token (inside a `<script type="application/json">` block, which
+the page `JSON.parse`s because that is much faster than compiling a multi-megabyte JS literal) with JSON
+(`samples`, `limits`, `sessions`, `api`, `apiPct`, field names as the template expects) and escapes every `<` in
 the JSON as `\u003c` so no value can end the script block. The database is opened `SQLITE_OPEN_READ_ONLY` per
 request with a 500 ms busy timeout; `?days=N` (default 30, `all`) bounds the rows so the page does
 not grow without limit; `?bucket=N` (seconds, default 60, `0` for effectively raw) keeps
@@ -88,14 +89,21 @@ branch changes, so the page's spend, compaction and branch-switch numbers match 
 about a quarter of the size. Idle bands can be up to one bucket longer. Per-request API time comes from the raw samples, not the downsampled
 ones: each increase in the cumulative `api_ms` is one request, except an increase longer than the
 wall time since the previous one, which is overlapping requests (parallel subagents) and is
-excluded. It is returned as counts per hour and power-of-two second bucket (`api`) plus exact
+excluded. Downsampling and API time are computed in Rust by `report/src/index.rs`, which keeps
+(rowid, ts, api_ms, input_tokens, branch) for every sample in memory per session and on each request
+reads only rows with a rowid above the last one seen. That relies on the statusline only ever
+inserting samples; if `count(*)` of the rows already read changes (file replaced, rows deleted) the
+index is rebuilt. Only the kept samples' full columns are then fetched, via `rarray()`. Rows are written
+straight from SQLite into the one response buffer (no `serde_json::Value` per row), which keeps the
+process under ~100 MB. It is returned as counts per hour and power-of-two second bucket (`api`) plus exact
 p50/p90 (`apiPct`). `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
 is static) into a `scratch` image (a stub `src/main.rs` stands in for the statusline package so the
 workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data directory at
 `/data`, which must be the directory rather than the file so SQLite can use the `-wal`/`-shm`
 files. Dragging across a time chart narrows `vt0`/`vt1` and redraws every chart registered with
 `timeChart`, rescaling y to the points in view; KPIs, tables, histograms and the heatmap stay on the
-whole window. Zoom cannot show finer detail than `?bucket=N` delivered. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
+whole window. Zoom cannot show finer detail than `?bucket=N` delivered. The "All samples" table is built the
+first time its `<details>` is opened, since it is most of the page's DOM. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
 categorical slots and the rest are muted "other", tables only.
 
 `--report-url <url>` appends `↗` wrapped in an OSC 8 hyperlink (`ESC ] 8 ; ; url ST … ESC ] 8 ; ; ST`)
