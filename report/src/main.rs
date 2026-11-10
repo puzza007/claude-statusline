@@ -4,7 +4,8 @@
 //! as JSON (the SQL aliases below are the field names the template expects).
 //! `GET /data.json` returns just the JSON and `GET /healthz` checks the database
 //! opens. The database is opened read-only per request, so the page always
-//! reflects what the statusline has recorded. Both `/` and `/data.json` take
+//! reflects what the statusline has recorded; `index::Index` keeps what downsampling
+//! needs in memory between requests and reads only the rows added since. Both `/` and `/data.json` take
 //! `?days=N` (default 30, `all` for everything) to bound the samples returned, and
 //! `?bucket=N` (seconds, default 60, `0` for raw) to downsample them. Per-request API
 //! times are always derived from the raw samples.
@@ -16,10 +17,17 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::get,
 };
-use rusqlite::{Connection, OpenFlags, types::ValueRef};
-use serde_json::{Map, Value, json};
+use index::Index;
+use rusqlite::{
+    Connection, OpenFlags,
+    types::{Value as SqlValue, ValueRef},
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+mod index;
 
 /// The report page. It is a body fragment (no doctype/head/body) so the same file
 /// can be published as a Claude artifact, which supplies its own skeleton; we do
@@ -33,55 +41,16 @@ const FOOT: &str = "</body></html>";
 const DEFAULT_DAYS: f64 = 30.0;
 const DEFAULT_BUCKET: i64 = 60;
 
-/// One ordered pass over the raw samples in the window, which `samples_session`
-/// (session_id, ts) delivers without a sort. It marks the samples to `keep`: the last
-/// of each session per `?2`-second bucket, plus the samples the page derives events
-/// from: each session's first (spend is measured from it), any followed by a
-/// compaction (input tokens falling below 70%, so the peak can be marked) and any
-/// branch change. Cumulative columns (cost, tokens, lines) stay exact at the kept
-/// points; only intermediate steps are dropped. `ms` is the increase in cumulative API
-/// time, which `REQUESTS` turns into per-request durations. Materialised in a temp
-/// table, since `SAMPLES` and `REQUESTS` both read it.
-const PASS: &str = "CREATE TEMP TABLE pass AS SELECT rowid id, session_id, ts,
-        api_ms - lag(api_ms) OVER w ms,
-        lead(ts) OVER w / ?2 IS NOT ts / ?2 OR row_number() OVER w = 1
-            OR lead(input_tokens) OVER w < input_tokens * 0.7
-            OR branch IS NOT lag(branch) OVER w keep
-    FROM samples WHERE ts >= ?1
-    WINDOW w AS (PARTITION BY session_id ORDER BY ts, rowid)";
+/// The samples `Index::window` kept, in full.
 const SAMPLES: &str = "SELECT ts, substr(session_id,1,8) sid, cwd, model_id, model, ctx_pct,
     input_tokens, output_tokens, cost_usd, duration_ms, api_ms, cc_lines_added cca,
     cc_lines_removed ccr, diff_added da, diff_removed dr, branch, five_hour_pct h5,
     five_hour_resets h5r, seven_day_pct d7, seven_day_resets d7r, uncached_in ui,
     cache_write cw, cache_read cr
-    FROM samples WHERE rowid IN (SELECT id FROM pass WHERE keep)
-    ORDER BY ts";
+    FROM samples WHERE rowid IN rarray(?1)
+    ORDER BY ts, rowid";
 const LIMITS: &str =
     "SELECT ts, model, used_pct, resets_at FROM usage_limits WHERE ts >= ?1 ORDER BY ts";
-/// Per-request API time. Claude Code's cumulative `total_api_duration_ms` moves once
-/// per completed API call, so each increase is a request's duration. Overlapping
-/// requests (parallel subagents) land as one increase longer than the wall time since
-/// the previous one finished; those are flagged `merged` and left out of the
-/// latencies. Read from the raw samples via `PASS`, since downsampling would merge
-/// them too. `API_TIME` and `API_PCT` both read the result.
-const REQUESTS: &str = "CREATE TEMP TABLE d AS SELECT ts, ms,
-        ms > (ts - lag(ts) OVER (PARTITION BY session_id ORDER BY ts)) * 1000 + 1000 merged
-    FROM pass WHERE ms > 0";
-/// Single-request counts per hour and power-of-two second bucket (0 is under 1 s,
-/// 7 is 64 s and over), which keeps a month of requests to a few thousand rows.
-const API_TIME: &str = "SELECT ts / 3600 * 3600 hour,
-        CASE WHEN ms < 1000 THEN 0 WHEN ms < 2000 THEN 1 WHEN ms < 4000 THEN 2
-            WHEN ms < 8000 THEN 3 WHEN ms < 16000 THEN 4 WHEN ms < 32000 THEN 5
-            WHEN ms < 64000 THEN 6 ELSE 7 END b,
-        count(*) n, sum(ms) ms
-    FROM d WHERE NOT merged GROUP BY hour, b ORDER BY hour, b";
-/// Exact median and 90th percentile of single requests, and how many were merged.
-const API_PCT: &str = "WITH r AS (SELECT ms, row_number() OVER (ORDER BY ms) i, count(*) OVER () n
-        FROM d WHERE NOT merged)
-    SELECT (SELECT max(n) FROM r) n,
-        (SELECT ms FROM r WHERE i = (n + 1) / 2) p50,
-        (SELECT ms FROM r WHERE i = (9 * n + 9) / 10) p90,
-        (SELECT count(*) FROM d WHERE merged IS NOT 0) merged";
 const SESSIONS: &str = "SELECT substr(session_id,1,8) sid, first_seen, last_seen, cwd, cc_version
     FROM sessions WHERE last_seen >= ?1 ORDER BY first_seen";
 
@@ -94,41 +63,108 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-/// Runs `sql` and returns its rows as JSON objects keyed by column name.
-fn query(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> rusqlite::Result<Value> {
-    let mut stmt = conn.prepare(sql)?;
-    let names: Vec<String> = stmt.column_names().iter().map(|n| n.to_string()).collect();
-    let rows = stmt
-        .query_map(params, |row| {
-            let mut obj = Map::with_capacity(names.len());
-            for (i, name) in names.iter().enumerate() {
-                let v = match row.get_ref(i)? {
-                    ValueRef::Null | ValueRef::Blob(_) => Value::Null,
-                    ValueRef::Integer(n) => json!(n),
-                    ValueRef::Real(f) => json!(f),
-                    ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                };
-                obj.insert(name.clone(), v);
+/// Appends to a buffer with every `<` written as `\u003c`. Inline JSON must not contain
+/// `<` or a value could end the script block, and it is the same string once parsed.
+/// Only JSON strings can contain one, so this is applied to strings alone.
+struct NoLt<'a>(&'a mut Vec<u8>);
+
+impl std::io::Write for NoLt<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for part in buf.split_inclusive(|&b| b == b'<') {
+            match part.split_last() {
+                Some((b'<', rest)) => {
+                    self.0.extend_from_slice(rest);
+                    self.0.extend_from_slice(b"\\u003c");
+                }
+                _ => self.0.extend_from_slice(part),
             }
-            Ok(Value::Object(obj))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Value::Array(rows))
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
-fn load(conn: &Connection, since: i64, bucket: i64) -> rusqlite::Result<Value> {
-    // In memory: the scratch image has no temp directory, and the connection is
-    // per request, so the table goes away with it.
-    conn.pragma_update(None, "temp_store", "MEMORY")?;
-    conn.execute(PASS, [since, bucket])?;
-    conn.execute(REQUESTS, [])?;
-    Ok(json!({
-        "samples": query(conn, SAMPLES, [])?,
-        "limits": query(conn, LIMITS, [since])?,
-        "sessions": query(conn, SESSIONS, [since])?,
-        "api": query(conn, API_TIME, [])?,
-        "apiPct": query(conn, API_PCT, [])?[0].take(),
-    }))
+/// Serialises `v` onto `out`; writing to a `Vec` cannot fail.
+fn put(out: &mut Vec<u8>, v: &impl serde::Serialize) {
+    serde_json::to_writer(NoLt(out), v).expect("serialise to a Vec");
+}
+
+/// Runs `sql` and appends its rows to `out` as a JSON array of objects keyed by column
+/// name, written straight from the SQLite rows without building them in memory first.
+fn query(
+    out: &mut Vec<u8>,
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(sql)?;
+    let keys: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(|n| serde_json::to_string(n).expect("serialise a str"))
+        .collect();
+    let mut rows = stmt.query(params)?;
+    out.push(b'[');
+    let mut first = true;
+    while let Some(row) = rows.next()? {
+        if !std::mem::take(&mut first) {
+            out.push(b',');
+        }
+        for (i, key) in keys.iter().enumerate() {
+            out.push(if i == 0 { b'{' } else { b',' });
+            out.extend_from_slice(key.as_bytes());
+            out.push(b':');
+            match row.get_ref(i)? {
+                ValueRef::Null | ValueRef::Blob(_) => out.extend_from_slice(b"null"),
+                ValueRef::Integer(n) => put(out, &n),
+                // Non-finite values come out as `null`.
+                ValueRef::Real(f) => put(out, &f),
+                ValueRef::Text(t) => put(out, &String::from_utf8_lossy(t)),
+            }
+        }
+        out.push(b'}');
+    }
+    out.push(b']');
+    Ok(())
+}
+
+/// Appends the report's JSON to `out`.
+fn load(
+    out: &mut Vec<u8>,
+    conn: &Connection,
+    index: &Mutex<Index>,
+    since: i64,
+    bucket: i64,
+) -> rusqlite::Result<()> {
+    let w = {
+        // A panic mid-refresh can only have left rows unapplied, which the next
+        // refresh's count check catches, so a poisoned lock is still usable.
+        let mut index = index.lock().unwrap_or_else(|e| e.into_inner());
+        index.refresh(conn)?;
+        index.window(since, bucket)
+    };
+    rusqlite::vtab::array::load_module(conn)?;
+    let keep = Rc::new(w.keep.into_iter().map(SqlValue::from).collect::<Vec<_>>());
+    out.extend_from_slice(b"{\"samples\":");
+    query(out, conn, SAMPLES, [keep])?;
+    out.extend_from_slice(b",\"limits\":");
+    query(out, conn, LIMITS, [since])?;
+    out.extend_from_slice(b",\"sessions\":");
+    query(out, conn, SESSIONS, [since])?;
+    out.extend_from_slice(b",\"api\":");
+    put(out, &w.api);
+    out.extend_from_slice(b",\"apiPct\":");
+    put(out, &w.api_pct);
+    out.push(b'}');
+    Ok(())
+}
+
+#[derive(Clone)]
+struct AppState {
+    db: PathBuf,
+    index: Arc<Mutex<Index>>,
 }
 
 /// Opens the database on a blocking thread and runs `f` against it.
@@ -178,27 +214,44 @@ fn bucket(params: &HashMap<String, String>) -> i64 {
 }
 
 async fn index(
-    State(db): State<PathBuf>,
+    State(st): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, Response> {
     let (s, b) = (since(&params), bucket(&params));
-    let v = with_db(db, move |c| load(c, s, b)).await?;
-    // No `<` may appear in inline JSON or a value could end the script block;
-    // `<` is the same string once parsed.
-    let page = TEMPLATE.replacen("__DATA__", &v.to_string().replace('<', "\\u003c"), 1);
-    Ok(Html(format!("{HEAD}{page}{FOOT}")))
+    let page = with_db(st.db, move |c| {
+        let (pre, post) = TEMPLATE
+            .split_once("__DATA__")
+            .expect("template has __DATA__");
+        // Sized for a month of samples, so the buffer rarely has to grow and copy.
+        let mut out = Vec::with_capacity(8 << 20);
+        out.extend_from_slice(HEAD.as_bytes());
+        out.extend_from_slice(pre.as_bytes());
+        load(&mut out, c, &st.index, s, b)?;
+        out.extend_from_slice(post.as_bytes());
+        out.extend_from_slice(FOOT.as_bytes());
+        Ok(out)
+    })
+    .await?;
+    Ok(Html(page))
 }
 
 async fn data_json(
-    State(db): State<PathBuf>,
+    State(st): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, Response> {
     let (s, b) = (since(&params), bucket(&params));
-    let v = with_db(db, move |c| load(c, s, b)).await?;
-    Ok(([(header::CONTENT_TYPE, "application/json")], v.to_string()))
+    let v = with_db(st.db, move |c| {
+        let mut out = Vec::new();
+        load(&mut out, c, &st.index, s, b)?;
+        Ok(out)
+    })
+    .await?;
+    Ok(([(header::CONTENT_TYPE, "application/json")], v))
 }
 
-async fn healthz(State(db): State<PathBuf>) -> Result<impl IntoResponse, Response> {
+async fn healthz(
+    State(AppState { db, .. }): State<AppState>,
+) -> Result<impl IntoResponse, Response> {
     let n = with_db(db, |c| {
         c.query_row("SELECT count(*) FROM samples", [], |r| r.get::<_, i64>(0))
     })
@@ -235,7 +288,10 @@ async fn main() {
         .route("/", get(index))
         .route("/data.json", get(data_json))
         .route("/healthz", get(healthz))
-        .with_state(db.clone());
+        .with_state(AppState {
+            db: db.clone(),
+            index: Arc::default(),
+        });
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .unwrap_or_else(|e| panic!("bind port {port}: {e}"));
@@ -244,4 +300,18 @@ async fn main() {
         .with_graceful_shutdown(shutdown())
         .await
         .expect("server");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strings_cannot_end_the_script_block() {
+        let mut out = Vec::new();
+        put(&mut out, &"a</script><b");
+        let s = String::from_utf8(out).unwrap();
+        assert!(!s.contains('<'), "{s}");
+        assert_eq!(serde_json::from_str::<String>(&s).unwrap(), "a</script><b");
+    }
 }
