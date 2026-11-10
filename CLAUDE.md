@@ -88,14 +88,16 @@ branch changes, so the page's spend, compaction and branch-switch numbers match 
 about a quarter of the size. Idle bands can be up to one bucket longer. Per-request API time comes from the raw samples, not the downsampled
 ones: each increase in the cumulative `api_ms` is one request, except an increase longer than the
 wall time since the previous one, which is overlapping requests (parallel subagents) and is
-excluded. It is returned as counts per hour and power-of-two second bucket (`api`) plus exact
+excluded. That pass runs once per request into an in-memory `TEMP` table (`temp_store=MEMORY`,
+since the `scratch` image has no temp directory) that both API queries read. It is returned as counts per hour and power-of-two second bucket (`api`) plus exact
 p50/p90 (`apiPct`). `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
 is static) into a `scratch` image (a stub `src/main.rs` stands in for the statusline package so the
 workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data directory at
 `/data`, which must be the directory rather than the file so SQLite can use the `-wal`/`-shm`
 files. Dragging across a time chart narrows `vt0`/`vt1` and redraws every chart registered with
 `timeChart`, rescaling y to the points in view; KPIs, tables, histograms and the heatmap stay on the
-whole window. Zoom cannot show finer detail than `?bucket=N` delivered. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
+whole window. Zoom cannot show finer detail than `?bucket=N` delivered. The "All samples" table is built the
+first time its `<details>` is opened, since it is most of the page's DOM. Chart colours follow the dataviz palette: the six largest sessions by spend take fixed
 categorical slots and the rest are muted "other", tables only.
 
 `--report-url <url>` appends `↗` wrapped in an OSC 8 hyperlink (`ESC ] 8 ; ; url ST … ESC ] 8 ; ; ST`)

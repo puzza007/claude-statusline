@@ -152,7 +152,7 @@ footer{color:var(--muted);font-size:12px;max-width:65ch}
   <div class="tablewrap"><table id="sessions"></table></div>
 </section>
 <section class="panel">
-  <details><summary>All samples as a table</summary>
+  <details id="samplesbox"><summary>All samples as a table</summary>
   <div class="tablewrap"><table id="samples"></table></div></details>
 </section>
 <footer>Source: <code class="mono">~/.local/share/claude-statusline/history.db</code> — tables <code class="mono">samples</code> (including the last request's cache split in <code class="mono">uncached_in</code>, <code class="mono">cache_write</code>, <code class="mono">cache_read</code>), <code class="mono">sessions</code>, <code class="mono">usage_limits</code>. Times shown in your local zone. Rate-limit lines take the max across sessions per 3-minute bucket, because a session waking from idle first reports the values it last saw. Costs are Claude Code's cumulative <code class="mono">total_cost_usd</code>; the spend chart subtracts each session's first observed value.</footer>
@@ -422,6 +422,8 @@ const dirsLine=(rows,name)=>{const ds=repos(rows);return ds.length===1&&ds[0]===
 const th=cols=>"<tr>"+cols.map(([c,n])=>`<th class="${n?'num':''}">${c}</th>`).join("")+"</tr>";
 $("#sessions").innerHTML=th([["Session"],["Model"],["Branches"],["Active"],["Samples",1],["Turns",1],["Context",1],["Session cost",1],["Spent here",1]])+
   ranked.map(s=>{const rows=bySid[s.sid],i=SESS[s.sid];return `<tr><td><span class="sw" style="background:${i.color}"></span>${i.name}${dirsLine(rows,i.name)}</td><td>${i.model}</td>${branchCell(rows)}<td class="mono">${fmtX(s.first_seen)} →<br>${fmtX(s.last_seen)}</td><td class="num">${rows.length}</td><td class="num">${turns.filter(t=>t.sid===s.sid).length}</td><td class="num">${rows.find(r=>r.ctx_pct!=null)?.ctx_pct??0}% → ${rows.findLast(r=>r.ctx_pct!=null)?.ctx_pct??0}%</td><td class="num">$${rows.at(-1).cost_usd.toFixed(2)}</td><td class="num">$${(rows.at(-1).cost_usd-rows[0].cost_usd).toFixed(2)}</td></tr>`;}).join("");
+// Built on first open: one row per sample is most of the page's DOM, and the table is collapsed.
+$("#samplesbox").addEventListener("toggle",e=>{if(!e.target.open||$("#samples").rows.length)return;
 $("#samples").innerHTML=th([["Time"],["Session"],["cwd"],["Model"],["ctx",1],["Input",1],["Output",1],["Cost",1],["Diff",1],["Branch"],["5h",1],["7d",1]])+
-  D.samples.map(r=>`<tr><td class="mono">${fmtT(r.ts)}</td><td>${SESS[r.sid].name}</td><td class="mono">${tilde(r.cwd)}</td><td class="mono">${r.model_id}</td><td class="num">${r.ctx_pct}%</td><td class="num">${r.input_tokens.toLocaleString()}</td><td class="num">${r.output_tokens.toLocaleString()}</td><td class="num">$${r.cost_usd.toFixed(2)}</td><td class="num">+${r.da??0} −${r.dr??0}</td><td class="mono">${r.branch}</td><td class="num">${r.h5}%</td><td class="num">${r.d7}%</td></tr>`).join("");
+  D.samples.map(r=>`<tr><td class="mono">${fmtT(r.ts)}</td><td>${SESS[r.sid].name}</td><td class="mono">${tilde(r.cwd)}</td><td class="mono">${r.model_id}</td><td class="num">${r.ctx_pct}%</td><td class="num">${r.input_tokens.toLocaleString()}</td><td class="num">${r.output_tokens.toLocaleString()}</td><td class="num">$${r.cost_usd.toFixed(2)}</td><td class="num">+${r.da??0} −${r.dr??0}</td><td class="mono">${r.branch}</td><td class="num">${r.h5}%</td><td class="num">${r.d7}%</td></tr>`).join("");});
 </script>

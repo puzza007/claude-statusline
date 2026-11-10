@@ -59,37 +59,30 @@ const LIMITS: &str =
 /// requests (parallel subagents) land as one increase longer than the wall time since
 /// the previous one finished; those are flagged `merged` and left out of the
 /// latencies. Read from the raw samples, since downsampling would merge them too.
-macro_rules! requests {
-    () => {
-        "WITH c AS (SELECT session_id, ts,
-            api_ms - lag(api_ms) OVER (PARTITION BY session_id ORDER BY ts, rowid) ms
-            FROM samples WHERE ts >= ?1),
-        d AS (SELECT ts, ms,
-            ms > (ts - lag(ts) OVER (PARTITION BY session_id ORDER BY ts)) * 1000 + 1000 merged
-            FROM c WHERE ms > 0) "
-    };
-}
+/// Materialised once per request into a temp table that `API_TIME` and `API_PCT` both
+/// read, since the window pass over the raw samples is the expensive part.
+const REQUESTS: &str = "CREATE TEMP TABLE d AS
+    WITH c AS (SELECT session_id, ts,
+        api_ms - lag(api_ms) OVER (PARTITION BY session_id ORDER BY ts, rowid) ms
+        FROM samples WHERE ts >= ?1)
+    SELECT ts, ms,
+        ms > (ts - lag(ts) OVER (PARTITION BY session_id ORDER BY ts)) * 1000 + 1000 merged
+    FROM c WHERE ms > 0";
 /// Single-request counts per hour and power-of-two second bucket (0 is under 1 s,
 /// 7 is 64 s and over), which keeps a month of requests to a few thousand rows.
-const API_TIME: &str = concat!(
-    requests!(),
-    "SELECT ts / 3600 * 3600 hour,
+const API_TIME: &str = "SELECT ts / 3600 * 3600 hour,
         CASE WHEN ms < 1000 THEN 0 WHEN ms < 2000 THEN 1 WHEN ms < 4000 THEN 2
             WHEN ms < 8000 THEN 3 WHEN ms < 16000 THEN 4 WHEN ms < 32000 THEN 5
             WHEN ms < 64000 THEN 6 ELSE 7 END b,
         count(*) n, sum(ms) ms
-    FROM d WHERE NOT merged GROUP BY hour, b ORDER BY hour, b"
-);
+    FROM d WHERE NOT merged GROUP BY hour, b ORDER BY hour, b";
 /// Exact median and 90th percentile of single requests, and how many were merged.
-const API_PCT: &str = concat!(
-    requests!(),
-    ", r AS (SELECT ms, row_number() OVER (ORDER BY ms) i, count(*) OVER () n
+const API_PCT: &str = "WITH r AS (SELECT ms, row_number() OVER (ORDER BY ms) i, count(*) OVER () n
         FROM d WHERE NOT merged)
     SELECT (SELECT max(n) FROM r) n,
         (SELECT ms FROM r WHERE i = (n + 1) / 2) p50,
         (SELECT ms FROM r WHERE i = (9 * n + 9) / 10) p90,
-        (SELECT count(*) FROM d WHERE merged IS NOT 0) merged"
-);
+        (SELECT count(*) FROM d WHERE merged IS NOT 0) merged";
 const SESSIONS: &str = "SELECT substr(session_id,1,8) sid, first_seen, last_seen, cwd, cc_version
     FROM sessions WHERE last_seen >= ?1 ORDER BY first_seen";
 
@@ -125,12 +118,16 @@ fn query(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> rusqlit
 }
 
 fn load(conn: &Connection, since: i64, bucket: i64) -> rusqlite::Result<Value> {
+    // In memory: the scratch image has no temp directory, and the connection is
+    // per request, so the table goes away with it.
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.execute(REQUESTS, [since])?;
     Ok(json!({
         "samples": query(conn, SAMPLES, [since, bucket])?,
         "limits": query(conn, LIMITS, [since])?,
         "sessions": query(conn, SESSIONS, [since])?,
-        "api": query(conn, API_TIME, [since])?,
-        "apiPct": query(conn, API_PCT, [since])?[0].take(),
+        "api": query(conn, API_TIME, [])?,
+        "apiPct": query(conn, API_PCT, [])?[0].take(),
     }))
 }
 
