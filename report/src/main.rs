@@ -33,24 +33,28 @@ const FOOT: &str = "</body></html>";
 const DEFAULT_DAYS: f64 = 30.0;
 const DEFAULT_BUCKET: i64 = 60;
 
-/// Keeps the last sample of each session per `?2`-second bucket, plus the samples the
-/// page derives events from: each session's first (spend is measured from it), any
-/// followed by a compaction (input tokens falling below 70%, so the peak can be
-/// marked) and any branch change. Cumulative columns (cost, tokens, lines) stay exact
-/// at the kept points; only intermediate steps are dropped.
+/// One ordered pass over the raw samples in the window, which `samples_session`
+/// (session_id, ts) delivers without a sort. It marks the samples to `keep`: the last
+/// of each session per `?2`-second bucket, plus the samples the page derives events
+/// from: each session's first (spend is measured from it), any followed by a
+/// compaction (input tokens falling below 70%, so the peak can be marked) and any
+/// branch change. Cumulative columns (cost, tokens, lines) stay exact at the kept
+/// points; only intermediate steps are dropped. `ms` is the increase in cumulative API
+/// time, which `REQUESTS` turns into per-request durations. Materialised in a temp
+/// table, since `SAMPLES` and `REQUESTS` both read it.
+const PASS: &str = "CREATE TEMP TABLE pass AS SELECT rowid id, session_id, ts,
+        api_ms - lag(api_ms) OVER w ms,
+        lead(ts) OVER w / ?2 IS NOT ts / ?2 OR row_number() OVER w = 1
+            OR lead(input_tokens) OVER w < input_tokens * 0.7
+            OR branch IS NOT lag(branch) OVER w keep
+    FROM samples WHERE ts >= ?1
+    WINDOW w AS (PARTITION BY session_id ORDER BY ts, rowid)";
 const SAMPLES: &str = "SELECT ts, substr(session_id,1,8) sid, cwd, model_id, model, ctx_pct,
     input_tokens, output_tokens, cost_usd, duration_ms, api_ms, cc_lines_added cca,
     cc_lines_removed ccr, diff_added da, diff_removed dr, branch, five_hour_pct h5,
     five_hour_resets h5r, seven_day_pct d7, seven_day_resets d7r, uncached_in ui,
     cache_write cw, cache_read cr
-    FROM (SELECT *,
-        row_number() OVER (PARTITION BY session_id, ts / ?2 ORDER BY ts DESC, rowid DESC) rn,
-        row_number() OVER w seq,
-        lead(input_tokens) OVER w next_in,
-        lag(branch) OVER w prev_branch
-        FROM samples WHERE ts >= ?1
-        WINDOW w AS (PARTITION BY session_id ORDER BY ts, rowid))
-    WHERE rn = 1 OR seq = 1 OR next_in < input_tokens * 0.7 OR branch IS NOT prev_branch
+    FROM samples WHERE rowid IN (SELECT id FROM pass WHERE keep)
     ORDER BY ts";
 const LIMITS: &str =
     "SELECT ts, model, used_pct, resets_at FROM usage_limits WHERE ts >= ?1 ORDER BY ts";
@@ -58,16 +62,11 @@ const LIMITS: &str =
 /// per completed API call, so each increase is a request's duration. Overlapping
 /// requests (parallel subagents) land as one increase longer than the wall time since
 /// the previous one finished; those are flagged `merged` and left out of the
-/// latencies. Read from the raw samples, since downsampling would merge them too.
-/// Materialised once per request into a temp table that `API_TIME` and `API_PCT` both
-/// read, since the window pass over the raw samples is the expensive part.
-const REQUESTS: &str = "CREATE TEMP TABLE d AS
-    WITH c AS (SELECT session_id, ts,
-        api_ms - lag(api_ms) OVER (PARTITION BY session_id ORDER BY ts, rowid) ms
-        FROM samples WHERE ts >= ?1)
-    SELECT ts, ms,
+/// latencies. Read from the raw samples via `PASS`, since downsampling would merge
+/// them too. `API_TIME` and `API_PCT` both read the result.
+const REQUESTS: &str = "CREATE TEMP TABLE d AS SELECT ts, ms,
         ms > (ts - lag(ts) OVER (PARTITION BY session_id ORDER BY ts)) * 1000 + 1000 merged
-    FROM c WHERE ms > 0";
+    FROM pass WHERE ms > 0";
 /// Single-request counts per hour and power-of-two second bucket (0 is under 1 s,
 /// 7 is 64 s and over), which keeps a month of requests to a few thousand rows.
 const API_TIME: &str = "SELECT ts / 3600 * 3600 hour,
@@ -121,9 +120,10 @@ fn load(conn: &Connection, since: i64, bucket: i64) -> rusqlite::Result<Value> {
     // In memory: the scratch image has no temp directory, and the connection is
     // per request, so the table goes away with it.
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    conn.execute(REQUESTS, [since])?;
+    conn.execute(PASS, [since, bucket])?;
+    conn.execute(REQUESTS, [])?;
     Ok(json!({
-        "samples": query(conn, SAMPLES, [since, bucket])?,
+        "samples": query(conn, SAMPLES, [])?,
         "limits": query(conn, LIMITS, [since])?,
         "sessions": query(conn, SESSIONS, [since])?,
         "api": query(conn, API_TIME, [])?,

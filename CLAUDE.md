@@ -78,7 +78,8 @@ recorded per row (not just the latest on `sessions`) so a branch is always attri
 Report (`report/`, workspace member `claude-statusline-report`): an axum service that serves the
 history as a chart page. `report/template.html` is the page; it has no document skeleton because
 the same file is published as a Claude artifact (which wraps it) and the server adds its own
-`<!doctype>`/`<head>`/`<body>`. The server replaces the single `__DATA__` token with JSON from three
+`<!doctype>`/`<head>`/`<body>`. The server replaces the single `__DATA__` token (inside a `<script type="application/json">` block, which
+the page `JSON.parse`s because that is much faster than compiling a multi-megabyte JS literal) with JSON from three
 queries (`samples`, `usage_limits`, `sessions`, aliases as the template expects) and escapes every `<` in
 the JSON as `\u003c` so no value can end the script block. The database is opened `SQLITE_OPEN_READ_ONLY` per
 request with a 500 ms busy timeout; `?days=N` (default 30, `all`) bounds the rows so the page does
@@ -88,8 +89,9 @@ branch changes, so the page's spend, compaction and branch-switch numbers match 
 about a quarter of the size. Idle bands can be up to one bucket longer. Per-request API time comes from the raw samples, not the downsampled
 ones: each increase in the cumulative `api_ms` is one request, except an increase longer than the
 wall time since the previous one, which is overlapping requests (parallel subagents) and is
-excluded. That pass runs once per request into an in-memory `TEMP` table (`temp_store=MEMORY`,
-since the `scratch` image has no temp directory) that both API queries read. It is returned as counts per hour and power-of-two second bucket (`api`) plus exact
+excluded. Downsampling and the `api_ms` deltas come from one window pass over the raw samples
+(`PASS`), materialised in an in-memory `TEMP` table (`temp_store=MEMORY`, since the `scratch` image
+has no temp directory) that the samples and both API queries read. It is returned as counts per hour and power-of-two second bucket (`api`) plus exact
 p50/p90 (`apiPct`). `report/Dockerfile` builds on `rust:1-alpine` (musl, so the release binary
 is static) into a `scratch` image (a stub `src/main.rs` stands in for the statusline package so the
 workspace resolves without libgit2); `docker-compose.yml` bind-mounts the data directory at

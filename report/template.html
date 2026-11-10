@@ -158,8 +158,11 @@ footer{color:var(--muted);font-size:12px;max-width:65ch}
 <footer>Source: <code class="mono">~/.local/share/claude-statusline/history.db</code> — tables <code class="mono">samples</code> (including the last request's cache split in <code class="mono">uncached_in</code>, <code class="mono">cache_write</code>, <code class="mono">cache_read</code>), <code class="mono">sessions</code>, <code class="mono">usage_limits</code>. Times shown in your local zone. Rate-limit lines take the max across sessions per 3-minute bucket, because a session waking from idle first reports the values it last saw. Costs are Claude Code's cumulative <code class="mono">total_cost_usd</code>; the spend chart subtracts each session's first observed value.</footer>
 </div>
 <div class="zoombar mono" id="zoombar" role="status" hidden><span id="zoomtext"></span><button type="button" id="zoomreset">Reset zoom</button></div>
+<script type="application/json" id="data">__DATA__</script>
 <script>
-const D=__DATA__;
+// A JSON block rather than a JS literal: JSON.parse is several times faster than
+// compiling a multi-megabyte object literal.
+const D=JSON.parse(document.getElementById("data").textContent);
 const SLOTS=["var(--s1)","var(--s2)","var(--s3)","var(--s4)","var(--s5)","var(--s6)"];
 const modelName=r=>r?.model?.split(" (")[0]??r?.model_id;
 const fmtT=ts=>new Date(ts*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
